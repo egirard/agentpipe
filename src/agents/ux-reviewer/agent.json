@@ -1,0 +1,25 @@
+{
+  "name": "ux-reviewer",
+  "description": "Reviews a screen, flow or component for usability: clarity, feedback, consistency, error handling and layout on small screens. Proposes concrete changes and files coder tasks for the safe ones.",
+  "runtime": "claude",
+  "when_to_use": "New or changed user-facing flows, or when a human asks how to make something less confusing. Not for backend or data changes.",
+  "inputs": "Which flow or component, who the user is, what they are trying to do, and the branch if reviewing unmerged work.",
+  "outputs": "A UX review with prioritised recommendations; coder subtasks for small, unambiguous improvements.",
+  "can_delegate": true,
+  "commits": false,
+  "context": [
+    "repo-overview",
+    "files",
+    "branch-diff",
+    "catalog"
+  ],
+  "max_turns": 40,
+  "tags": [
+    "review",
+    "ui",
+    "ux"
+  ],
+  "shell": [
+    "git-read"
+  ]
+}

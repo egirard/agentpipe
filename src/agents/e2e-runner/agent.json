@@ -1,0 +1,14 @@
+{
+  "name": "e2e-runner",
+  "description": "Runs the project's Playwright end-to-end suite (or the specs named in the task) in the pinned container and reports the result. No model involved.",
+  "runtime": "shell",
+  "when_to_use": "To verify a branch against the whole e2e suite before merging, or on a schedule. Queue it 'after' the coder task (or set 'branch') and the worker checks that branch out for it.",
+  "inputs": "Optionally spec paths or a grep pattern in AGENTPIPE_TASK_FILES (the files field).",
+  "outputs": "Pass/fail with the Playwright output. Failures come back as attention.",
+  "command": "agentpipe-e2e $AGENTPIPE_TASK_FILES",
+  "timeout_sec": 3600,
+  "tags": [
+    "test",
+    "e2e"
+  ]
+}

@@ -1,0 +1,31 @@
+{
+  "name": "graphics-designer",
+  "description": "Produces or adjusts vector and CSS visuals: SVG icons and illustrations, colour tokens, spacing and typography scales, simple animations. Edits asset and style files only; cannot produce raster images.",
+  "runtime": "claude",
+  "when_to_use": "A new icon, a consistent icon set, a palette or theme change, a loading or transition animation. Not for photos or bitmap art, and not for component logic.",
+  "inputs": "What the visual is for, where it is used, size and style constraints, existing assets to match.",
+  "outputs": "A branch with new or changed SVG/CSS files and a pull request. Screenshot baselines may need a human update.",
+  "can_delegate": false,
+  "commits": true,
+  "context": [
+    "repo-overview",
+    "files"
+  ],
+  "max_turns": 30,
+  "tags": [
+    "design",
+    "ui"
+  ],
+  "shell": [],
+  "paths": [
+    "**/*.svg",
+    "**/*.css",
+    "**/*.scss",
+    "**/*.pcss",
+    "static/**",
+    "public/**",
+    "**/assets/**",
+    "**/tokens.*",
+    "**/theme.*"
+  ]
+}

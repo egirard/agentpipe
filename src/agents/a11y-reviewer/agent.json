@@ -1,0 +1,25 @@
+{
+  "name": "a11y-reviewer",
+  "description": "Audits Svelte components and pages for accessibility: semantics, keyboard operability, focus management, ARIA, contrast and motion. Files coder tasks for concrete fixes.",
+  "runtime": "claude",
+  "when_to_use": "After UI work, or as a periodic audit of a screen or component family. Not for non-UI changes.",
+  "inputs": "Which components, routes or user flows to audit, and the branch if reviewing unmerged work.",
+  "outputs": "An audit report with WCAG-referenced findings; coder subtasks for fixes that are mechanical enough for the pipeline.",
+  "can_delegate": true,
+  "commits": false,
+  "context": [
+    "repo-overview",
+    "files",
+    "branch-diff",
+    "catalog"
+  ],
+  "max_turns": 40,
+  "tags": [
+    "review",
+    "ui",
+    "a11y"
+  ],
+  "shell": [
+    "git-read"
+  ]
+}

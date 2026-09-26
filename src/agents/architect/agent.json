@@ -1,0 +1,23 @@
+{
+  "name": "architect",
+  "description": "Breaks a feature request, bug, or goal into a dependency-ordered set of tasks for the other agents. Use for anything bigger than one small change.",
+  "runtime": "claude",
+  "when_to_use": "The default entry point for human requests. Not for a single small change that a coder can take directly.",
+  "inputs": "The goal in the user's words, plus any constraints (scope, files to avoid, deadlines).",
+  "outputs": "Subtasks for coder, reviewers, testers and others; a short plan in the summary. Writes no code itself.",
+  "can_delegate": true,
+  "commits": false,
+  "context": [
+    "repo-overview",
+    "queue",
+    "catalog"
+  ],
+  "max_turns": 60,
+  "tags": [
+    "planning"
+  ],
+  "shell": [
+    "git-read",
+    "gh-read"
+  ]
+}

@@ -1,0 +1,27 @@
+{
+  "ollamaUrl": "http://127.0.0.1:11434",
+  "models": {
+    "coder": "qwen2.5-coder:7b",
+    "reviewer": "qwen2.5-coder:7b",
+    "cloud": "opus"
+  },
+  "claudeBin": "claude",
+  "numCtx": 8192,
+  "commands": {
+    "lint": "bun run lint",
+    "unit": "bun run test:unit",
+    "e2e": "agentpipe-e2e"
+  },
+  "limits": {
+    "localAttempts": 3,
+    "cloudIterations": 25,
+    "replans": 2,
+    "coderContextChars": 40000,
+    "testOutputChars": 12000,
+    "commandTimeoutSec": 900
+  },
+  "cloudEnabled": true,
+  "cloudFinalReview": true,
+  "runE2e": true,
+  "push": false
+}

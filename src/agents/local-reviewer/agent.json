@@ -1,0 +1,10 @@
+{
+  "name": "local-reviewer",
+  "description": "Cheap first-pass review of a small branch diff by the local model. No cloud usage. Best for quick sanity checks; escalate real concerns to code-reviewer.",
+  "runtime": "ollama",
+  "when_to_use": "Low-risk changes where a quick second opinion is enough, or when cloud usage should be spared. Not for large diffs (the local context window is small).",
+  "inputs": "The branch to review and a one-line statement of what it should do.",
+  "outputs": "A short report with findings. Cannot create subtasks.",
+  "context": ["branch-diff"],
+  "tags": ["review", "local"]
+}

@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Run Playwright e2e specs for the current repo inside the official Playwright image,
+# so the Chromium build matches the one the committed screenshot baselines came from.
+#
+#   agentpipe-e2e [spec-or-grep ...]
+#
+# Env:
+#   PLAYWRIGHT_IMAGE  override image (default derived from node_modules/@playwright/test)
+#   AGENTPIPE_REPO    repo root (default: cwd)
+set -euo pipefail
+REPO=${AGENTPIPE_REPO:-$(pwd)}
+cd "$REPO"
+
+ver=$(node -p 'require("./node_modules/@playwright/test/package.json").version' 2>/dev/null || echo "")
+if [ -z "$ver" ]; then
+  echo "agentpipe-e2e: run 'bun install' in the repo first (need node_modules/@playwright/test)" >&2
+  exit 2
+fi
+IMAGE=${PLAYWRIGHT_IMAGE:-mcr.microsoft.com/playwright:v${ver}-noble}
+# Named volumes per Playwright version: the container gets its own node_modules (mounted over
+# the host one, which was installed for NixOS) and its own bun cache, so nothing is mixed.
+tag=$(echo "$ver" | tr . -)
+
+exec "${CONTAINER_RUNTIME:-podman}" run --rm --network host --ipc host \
+  -v "$REPO":/work \
+  -v "agentpipe-nm-$tag":/work/node_modules \
+  -v "agentpipe-bun-$tag":/root/.bun \
+  -w /work \
+  -e CI=1 \
+  "$IMAGE" bash -lc '
+    set -e
+    export PATH="/root/.bun/bin:$PATH"
+    command -v bun >/dev/null || npm i -g bun >/dev/null 2>&1
+    bun install --frozen-lockfile >/dev/null
+    exec bunx playwright test "$@"
+  ' _ "$@"

@@ -1,0 +1,24 @@
+{
+  "name": "gitbot",
+  "description": "Housekeeping for branches and pull requests: reports CI status, merge conflicts and review state of agentpipe PRs, comments on PRs with pipeline reports, and lists branches safe to delete. Never merges.",
+  "runtime": "claude",
+  "when_to_use": "When PRs pile up, after main moves and agentpipe branches may conflict, or to attach a summary comment to a PR. Not for code changes.",
+  "inputs": "Which PRs or branches to look at, and what to do (report, comment, list stale).",
+  "outputs": "A report; PR comments when asked. Merging and branch deletion stay with the human.",
+  "can_delegate": true,
+  "commits": false,
+  "context": [
+    "queue",
+    "catalog"
+  ],
+  "max_turns": 30,
+  "tags": [
+    "git",
+    "management"
+  ],
+  "shell": [
+    "git-read",
+    "gh-read",
+    "gh-comment"
+  ]
+}

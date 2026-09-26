@@ -1,0 +1,29 @@
+{
+  "name": "shell-runner",
+  "description": "The only agent allowed a broad shell: runs installs, builds, test suites and scripted checks that other agents may not, after vetting each command against the policy, and reports the results.",
+  "runtime": "claude",
+  "when_to_use": "When another agent's task needs a command outside its shell groups: a dependency install, a build, a full test suite, a scripted migration check, a bundle-size measurement. Not for reading code (reviewers can read) and not for editing files.",
+  "inputs": "The exact command(s) or the goal they serve, the directory if not the repo root, and what result counts as success. State why the command is needed.",
+  "outputs": "A report with each command, its verdict (run / refused and why), exit code, and the relevant output. Findings for anything the output reveals. Can delegate follow-up fixes to coder.",
+  "can_delegate": true,
+  "commits": false,
+  "model": "sonnet",
+  "shell": [
+    "ops",
+    "git-read",
+    "gh-read",
+    "checks",
+    "package-read"
+  ],
+  "context": [
+    "repo-overview",
+    "files",
+    "catalog"
+  ],
+  "max_turns": 30,
+  "timeout_sec": 3600,
+  "tags": [
+    "ops",
+    "shell"
+  ]
+}

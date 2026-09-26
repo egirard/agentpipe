@@ -1,0 +1,31 @@
+{
+  "name": "docs-writer",
+  "description": "Writes or updates Markdown documentation (README, docs/, CONTRIBUTING, changelogs) to match the code. Edits only documentation files.",
+  "runtime": "claude",
+  "when_to_use": "After behaviour visible to users or contributors changed, or when docs are missing or stale. Not for code comments or code changes.",
+  "inputs": "Which documents to write or update and what changed (or the branch that changed it).",
+  "outputs": "A branch with documentation changes and a pull request.",
+  "can_delegate": false,
+  "commits": true,
+  "context": [
+    "repo-overview",
+    "files",
+    "branch-diff"
+  ],
+  "max_turns": 30,
+  "tags": [
+    "docs"
+  ],
+  "shell": [
+    "git-read"
+  ],
+  "paths": [
+    "**/*.md",
+    "**/*.mdx",
+    "**/*.txt",
+    "**/*.rst",
+    "docs/**",
+    "LICENSE*",
+    "CHANGELOG*"
+  ]
+}

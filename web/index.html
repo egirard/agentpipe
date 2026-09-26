@@ -1,0 +1,343 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mothership status</title>
+<meta name="color-scheme" content="light dark">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<style>
+:root {
+  --surface: #fcfcfb; --surface-2: #f1f1ee; --line: #dcdcd6;
+  --text: #0b0b0b; --text-2: #52514e; --muted: #8a8983;
+  --accent: #2a78d6; --accent-soft: #dbe8f9;
+  --good: #0ca30c; --warning: #fab219; --serious: #ec835a; --critical: #d03b3b;
+  --good-text: #006300; --warning-text: #7a5300; --critical-text: #a12525;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --surface: #1a1a19; --surface-2: #242423; --line: #3a3a37;
+    --text: #ffffff; --text-2: #c3c2b7; --muted: #8f8e86;
+    --accent: #3987e5; --accent-soft: #1f3550;
+    --good-text: #6fd66f; --warning-text: #fac85a; --critical-text: #ff7b7b;
+  }
+}
+:root[data-theme="dark"] {
+  --surface: #1a1a19; --surface-2: #242423; --line: #3a3a37;
+  --text: #ffffff; --text-2: #c3c2b7; --muted: #8f8e86;
+  --accent: #3987e5; --accent-soft: #1f3550;
+  --good-text: #6fd66f; --warning-text: #fac85a; --critical-text: #ff7b7b;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body { background: var(--surface); color: var(--text); font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; padding: 0 16px 48px; }
+a { color: var(--accent); }
+main { max-width: 1120px; margin: 0 auto; }
+header { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 20px; padding: 20px 0 12px; border-bottom: 1px solid var(--line); }
+h1 { font-size: 22px; margin: 0; font-weight: 650; letter-spacing: -0.01em; }
+h2 { font-size: 15px; margin: 28px 0 10px; color: var(--text-2); font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
+.pill { display: inline-flex; align-items: center; gap: 8px; padding: 4px 12px 4px 8px; border-radius: 999px; font-weight: 600; font-size: 14px; border: 1px solid var(--line); background: var(--surface-2); }
+.pill .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--muted); }
+.pill.online .dot { background: var(--good); }
+.pill.offline .dot { background: var(--critical); }
+.pill.checking .dot { background: var(--warning); }
+.spacer { flex: 1; }
+nav a { margin-left: 14px; font-weight: 500; text-decoration: none; }
+nav a:hover { text-decoration: underline; }
+.meta { color: var(--muted); font-size: 13px; }
+#banner { display: none; margin: 16px 0 0; padding: 12px 14px; border-radius: 8px; border: 1px solid var(--critical); background: color-mix(in srgb, var(--critical) 10%, var(--surface)); }
+#banner.show { display: block; }
+#banner strong { color: var(--critical-text); }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; }
+.tile { background: var(--surface-2); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+.tile .label { color: var(--text-2); font-size: 13px; }
+.tile .value { font-size: 30px; font-weight: 600; line-height: 1.15; margin-top: 2px; }
+.tile .sub { color: var(--muted); font-size: 12px; margin-top: 2px; min-height: 1.2em; }
+.tile.needs .value { color: var(--critical-text); }
+.checks { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 8px; }
+.check { display: grid; grid-template-columns: 22px 1fr; gap: 10px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); align-items: start; }
+.check .ico { width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center; color: #fff; font-size: 13px; font-weight: 700; margin-top: 1px; }
+.check.good .ico { background: var(--good); }
+.check.warning .ico { background: var(--warning); color: #0b0b0b; }
+.check.critical .ico { background: var(--critical); }
+.check .name { font-weight: 600; }
+.check .detail { color: var(--text-2); font-size: 13px; overflow-wrap: anywhere; }
+.meters { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; }
+.meter { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; background: var(--surface-2); }
+.meter .row { display: flex; justify-content: space-between; font-size: 13px; color: var(--text-2); }
+.meter .row b { color: var(--text); font-weight: 600; }
+.meter .track { height: 8px; border-radius: 4px; background: var(--accent-soft); margin-top: 6px; overflow: hidden; }
+.meter .fill { height: 100%; border-radius: 4px; background: var(--accent); }
+.meter.warn .fill { background: var(--warning); }
+.meter.crit .fill { background: var(--critical); }
+.meter.warn .track { background: color-mix(in srgb, var(--warning) 25%, var(--surface)); }
+.meter.crit .track { background: color-mix(in srgb, var(--critical) 25%, var(--surface)); }
+table { width: 100%; border-collapse: collapse; font-size: 14px; }
+th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { color: var(--text-2); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+td.id { font-family: var(--mono); font-size: 13px; white-space: nowrap; color: var(--text-2); }
+tr.row { cursor: pointer; }
+tr.row:hover td { background: var(--surface-2); }
+tr.detail td { background: var(--surface-2); padding: 10px 14px 14px; }
+.badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; border: 1px solid var(--line); white-space: nowrap; }
+.badge.done { color: var(--good-text); border-color: var(--good); }
+.badge.attention, .badge.blocked { color: var(--warning-text); border-color: var(--warning); }
+.badge.failed { color: var(--critical-text); border-color: var(--critical); }
+.badge.running { color: var(--accent); border-color: var(--accent); }
+.badge.cancelled, .badge.queued, .badge.waiting, .badge.review { color: var(--text-2); }
+.tools { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; align-items: center; }
+select, input[type=search], button { font: inherit; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--line); background: var(--surface-2); color: var(--text); }
+button { cursor: pointer; }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--mono); font-size: 12.5px; background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 10px; max-height: 360px; overflow: auto; margin: 8px 0 0; }
+.agents { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 8px; font-size: 13px; }
+.agent { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; background: var(--surface-2); }
+.agent b { font-family: var(--mono); font-weight: 600; }
+.agent .head { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 4px; }
+.agent .tag { font-size: 11px; padding: 0 6px; border-radius: 999px; border: 1px solid var(--line); color: var(--text-2); }
+.agent .tag.on { border-color: var(--accent); color: var(--accent); }
+.agent .stats { color: var(--muted); font-size: 12px; margin-top: 6px; }
+.agent details { margin-top: 6px; }
+.agent details p { margin: 4px 0; }
+.agent dt { color: var(--text-2); font-size: 12px; margin-top: 4px; }
+.agent dd { margin: 0; }
+.stale { opacity: 0.62; }
+details summary { cursor: pointer; color: var(--text-2); }
+.empty { color: var(--muted); font-style: italic; }
+.small { font-size: 13px; color: var(--text-2); }
+@media (max-width: 640px) { .tile .value { font-size: 24px; } th:nth-child(6), td:nth-child(6) { display: none; } }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1 id="hostname">mothership</h1>
+    <span id="pill" class="pill checking"><span class="dot"></span><span id="pill-text">checking…</span></span>
+    <span class="meta" id="updated"></span>
+    <span class="spacer"></span>
+    <nav>
+      <a id="webui-link" href="#" rel="noopener">LLM chat</a>
+      <a href="/api/status" rel="noopener">JSON</a>
+      <a href="#" id="refresh">Refresh</a>
+    </nav>
+  </header>
+
+  <div id="banner"><strong>mothership is not answering.</strong> <span id="banner-text"></span></div>
+  <p class="small" id="secure-hint" hidden>To keep this page available while the box is down, open the <a id="https-link" href="#">HTTPS version</a> once and trust its certificate (<a href="/ca.crt">download</a>: Windows → Install Certificate → Current User → Trusted Root Certification Authorities).</p>
+
+  <h2>Queue</h2>
+  <div class="tiles" id="tiles"></div>
+  <div id="projects" class="small" style="margin-top:8px"></div>
+
+  <h2>System checks</h2>
+  <div class="checks" id="checks"></div>
+
+  <h2>Machine</h2>
+  <div class="meters" id="meters"></div>
+
+  <h2>In flight</h2>
+  <div id="inflight"></div>
+
+  <h2>Needs you</h2>
+  <div id="needsyou"></div>
+
+  <h2>History</h2>
+  <div class="tools">
+    <select id="f-status"><option value="">all outcomes</option><option>done</option><option>attention</option><option>failed</option><option>cancelled</option></select>
+    <select id="f-agent"><option value="">all agents</option></select>
+    <input type="search" id="f-q" placeholder="search titles">
+    <button id="more">Load more</button>
+    <span class="small" id="hist-count"></span>
+  </div>
+  <div id="history"></div>
+
+  <h2>Architect</h2>
+  <div id="architect"></div>
+
+  <h2>Agents</h2>
+  <p class="small" id="agents-intro"></p>
+  <div class="agents" id="agents"></div>
+
+  <p class="meta" id="footer"></p>
+</main>
+
+<script>
+(() => {
+  const $ = (s) => document.querySelector(s);
+  const KEY = "agentpipe-status-snapshot";
+  const OFF = "agentpipe-status-offline-since";
+  let snapshot = null, online = null, historyLimit = 60, extraHistory = null;
+
+  const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  const age = (iso) => { if (!iso) return ""; const s = (Date.now() - Date.parse(iso)) / 1000; if (s < 0) return "now"; if (s < 90) return Math.round(s) + "s"; if (s < 5400) return Math.round(s / 60) + "m"; if (s < 172800) return Math.round(s / 3600) + "h"; return Math.round(s / 86400) + "d"; };
+  const dur = (sec) => sec == null ? "" : sec < 90 ? sec + "s" : sec < 5400 ? Math.round(sec / 60) + "m" : (sec / 3600).toFixed(1) + "h";
+  const upt = (sec) => { const d = Math.floor(sec / 86400), h = Math.floor((sec % 86400) / 3600), m = Math.floor((sec % 3600) / 60); return d ? `${d}d ${h}h` : h ? `${h}h ${m}m` : `${m}m`; };
+  const bytes = (b) => { const u = ["B", "KB", "MB", "GB", "TB"]; let i = 0; while (b >= 1024 && i < 4) { b /= 1024; i++; } return b.toFixed(i >= 3 ? 1 : 0) + " " + u[i]; };
+  const when = (iso) => iso ? new Date(iso).toLocaleString() : "";
+  const badge = (s) => `<span class="badge ${esc(s)}">${esc(s)}</span>`;
+
+  function setOnline(ok) {
+    online = ok;
+    const pill = $("#pill");
+    pill.className = "pill " + (ok ? "online" : "offline");
+    if (ok) {
+      localStorage.removeItem(OFF);
+      $("#pill-text").textContent = "online";
+      $("#banner").classList.remove("show");
+      document.body.classList.remove("stale");
+    } else {
+      let since = localStorage.getItem(OFF);
+      if (!since) { since = new Date().toISOString(); localStorage.setItem(OFF, since); }
+      $("#pill-text").textContent = "offline since " + new Date(since).toLocaleTimeString();
+      $("#banner-text").textContent = (snapshot ? `Showing the last snapshot from ${when(snapshot.ts)}. ` : "No earlier snapshot is available. ") + "Retrying every 20 seconds.";
+      $("#banner").classList.add("show");
+      document.body.classList.add("stale");
+    }
+  }
+
+  function tile(label, value, sub, cls = "") { return `<div class="tile ${cls}"><div class="label">${esc(label)}</div><div class="value">${esc(value)}</div><div class="sub">${esc(sub || "")}</div></div>`; }
+  function meter(label, pct, right, cls) { return `<div class="meter ${cls || ""}"><div class="row"><span>${esc(label)}</span><b>${esc(right)}</b></div><div class="track"><div class="fill" style="width:${Math.max(0, Math.min(100, pct))}%"></div></div></div>`; }
+  function taskLine(t) { return `<tr class="row" data-id="${t.id}"><td class="id">#${t.id}</td><td>${badge(t.status)}</td><td>${esc(t.agent)}</td><td>${esc(t.title)}${t.pr_url ? ` · <a href="${esc(t.pr_url)}" target="_blank" rel="noopener">PR</a>` : t.branch ? ` <span class="small">(${esc(t.branch)})</span>` : ""}${t.error ? `<div class="small" style="color:var(--critical-text)">${esc(t.error)}</div>` : ""}</td><td class="num">${esc(dur(t.durationSec))}</td><td class="num" title="${esc(when(t.finished_at || t.started_at || t.created_at))}">${esc(age(t.finished_at || t.started_at || t.created_at))}</td></tr>`; }
+  const thead = `<thead><tr><th>id</th><th>status</th><th>agent</th><th>task</th><th class="num">took</th><th class="num">when</th></tr></thead>`;
+  function table(rows, empty) { return rows.length ? `<table>${thead}<tbody>${rows.map(taskLine).join("")}</tbody></table>` : `<p class="empty">${esc(empty)}</p>`; }
+
+  function render(s) {
+    $("#hostname").textContent = s.host.name;
+    document.title = s.host.name + " status";
+    $("#webui-link").href = `http://${location.hostname}:8080/`;
+    $("#updated").textContent = "data from " + when(s.ts) + (online ? "" : " (stale)");
+    const c = s.totals;
+    const needs = c.attention + c.failed + c.blocked;
+    $("#tiles").innerHTML = [
+      tile("Queued", c.queued, c.blocked ? `${c.blocked} blocked` : ""),
+      tile("Running", c.running, s.queue.flatMap((q) => q.running).map((t) => "#" + t.id).join(", ")),
+      tile("Waiting on children", c.waiting + c.review, c.review ? `${c.review} ready for the architect` : ""),
+      tile("Needs you", needs, needs ? `${c.attention} attention, ${c.failed} failed, ${c.blocked} blocked` : "nothing", needs ? "needs" : ""),
+      tile("Done", c.done, "all time"),
+      tile("Claude today", s.budgets ? "$" + s.budgets.todayUsd.toFixed(2) : "?", s.budgets ? (s.budgets.dailyCapUsd ? `of $${s.budgets.dailyCapUsd} · $${s.budgets.weekUsd.toFixed(2)} this week` : `$${s.budgets.weekUsd.toFixed(2)} this week`) : ""),
+    ].join("");
+    $("#projects").innerHTML = s.queue.map((q) => `<b>${esc(q.project)}</b>: ${Object.entries(q.counts).filter(([, n]) => n).map(([k, n]) => `${n} ${k}`).join(", ") || "empty"} <span class="meta">(${esc(q.path)}${q.push ? ", PRs on" : ", PRs off"})</span>`).join("<br>")
+      + (s.lanes ? `<br>lanes: ${s.lanes.map((l) => `${esc(l.lane)} ${l.running.length}/${l.slots}${l.running.length ? " (#" + l.running.join(", #") + ")" : ""}`).join(" · ")}` : "");
+    $("#checks").innerHTML = s.checks.map((k) => `<div class="check ${k.level}"><div class="ico" aria-hidden="true">${k.ok ? "✓" : k.level === "warning" ? "!" : "✕"}</div><div><div class="name">${esc(k.name)} <span class="small">· ${k.ok ? "ok" : k.level}</span></div><div class="detail">${esc(k.detail)}</div></div></div>`).join("");
+    const m = s.host.mem, memPct = Math.round((m.usedBytes / m.totalBytes) * 100);
+    const meters = [
+      meter("Uptime · load", 100 * Math.min(1, s.host.load[0] / s.host.cpus), `${upt(s.host.uptimeSec)} · ${s.host.load.join(" ")}`),
+      meter("Memory", memPct, `${bytes(m.usedBytes)} / ${bytes(m.totalBytes)}`, memPct > 92 ? "crit" : memPct > 80 ? "warn" : ""),
+    ];
+    if (s.gpu) {
+      meters.push(meter("GPU busy", s.gpu.utilPct, `${s.gpu.utilPct}% · ${s.gpu.tempC} °C`, s.gpu.tempC > 85 ? "warn" : ""));
+      meters.push(meter("VRAM", (s.gpu.memUsedMb / s.gpu.memTotalMb) * 100, `${s.gpu.memUsedMb} / ${s.gpu.memTotalMb} MB`));
+    }
+    for (const d of s.disks) meters.push(meter("Disk " + d.mount, d.usedPct, `${d.usedPct}% of ${bytes(d.totalBytes)}`, d.usedPct >= 95 ? "crit" : d.usedPct >= 85 ? "warn" : ""));
+    if (s.ollama) meters.push(`<div class="meter"><div class="row"><span>Ollama models</span><b>${s.ollama.loaded.length ? "loaded: " + esc(s.ollama.loaded.join(", ")) : "idle"}</b></div><div class="small">${s.ollama.models.map((x) => esc(x.name)).join(", ")}</div></div>`);
+    $("#meters").innerHTML = meters.join("");
+    const inflight = s.queue.flatMap((q) => [...q.running, ...q.next]);
+    $("#inflight").innerHTML = table(inflight, "queue is empty");
+    const needsYou = s.queue.flatMap((q) => q.needsYou);
+    $("#needsyou").innerHTML = table(needsYou, "nothing waiting on a human");
+    renderHistory();
+    $("#architect").innerHTML = s.queue.map((q) => `<div class="small">${esc(q.project)}: last review ${q.lastReview ? when(q.lastReview) + " (" + age(q.lastReview) + " ago)" : "never"}${q.push ? " · pull requests on" : " · pull requests off"}</div>`).join("")
+      + (s.architect.timer ? `<div class="small">timer ${s.architect.timer.active ? "active, next " + esc(s.architect.timer.next) : "inactive"}</div>` : "")
+      + (s.architect.digestExcerpt ? `<details open><summary>Latest digest (${esc(when(s.architect.digestAt))})</summary><pre>${esc(s.architect.digestExcerpt)}</pre></details>` : `<p class="empty">no digest yet</p>`);
+    $("#agents-intro").textContent = `${s.agents.length} agents registered. The architect chooses among them by description; each one advertises one skill, verifies its own output, and reports done, attention or failed.`;
+    $("#agents").innerHTML = s.agents.map((a) => {
+      const st = a.stats || {};
+      const tags = [
+        `<span class="tag">${esc(a.runtime)}</span>`,
+        a.commits ? `<span class="tag on">commits</span>` : "",
+        a.can_delegate ? `<span class="tag on">delegates</span>` : "",
+        a.verifier ? `<span class="tag">verified: ${esc(a.verifier)}</span>` : `<span class="tag">no verifier</span>`,
+        a.tests ? `<span class="tag">tests</span>` : "",
+        a.lane ? `<span class="tag">${esc(a.lane)} lane</span>` : "",
+        a.shell && a.shell.length ? `<span class="tag">shell: ${esc(a.shell.join(", "))}</span>` : `<span class="tag">no shell</span>`,
+        a.model ? `<span class="tag">${esc(a.model)}</span>` : "",
+        a.health && a.health.warn ? `<span class="tag" style="border-color:var(--critical);color:var(--critical-text)">struggling</span>` : "",
+        a.builtin === false ? `<span class="tag">custom</span>` : "",
+      ].join("");
+      const stats = st.runs ? `${st.runs} run${st.runs === 1 ? "" : "s"}: ${st.done} done, ${st.attention} attention, ${st.failed} failed${st.open ? `, ${st.open} open` : ""}${st.avgSec != null ? ` · avg ${dur(st.avgSec)}` : ""}${st.lastFinished ? ` · last ${age(st.lastFinished)} ago` : ""}` : "never run";
+      return `<div class="agent"><div class="head"><b>${esc(a.name)}</b>${tags}</div><div>${esc(a.description)}</div><div class="stats">${stats}</div>
+        <details><summary>details</summary><dl>
+          ${a.when_to_use ? `<dt>when to use</dt><dd>${esc(a.when_to_use)}</dd>` : ""}
+          ${a.inputs ? `<dt>task must include</dt><dd>${esc(a.inputs)}</dd>` : ""}
+          ${a.outputs ? `<dt>produces</dt><dd>${esc(a.outputs)}</dd>` : ""}
+          ${a.paths && a.paths.length ? `<dt>may change</dt><dd>${esc(a.paths.join(", "))}</dd>` : ""}
+          ${a.tools && a.tools.length ? `<dt>extra tools</dt><dd>${esc(a.tools.join(", "))}</dd>` : ""}
+          ${a.version ? `<dt>version</dt><dd class="small">${esc(a.version)}</dd>` : ""}
+          ${a.context && a.context.length ? `<dt>context</dt><dd>${esc(a.context.join(", "))}</dd>` : ""}
+          ${a.tags && a.tags.length ? `<dt>tags</dt><dd>${esc(a.tags.join(", "))}</dd>` : ""}
+          <dt>source</dt><dd class="small">${esc(a.source)}${a.extras && a.extras.length ? ` (+ ${esc(a.extras.join(", "))})` : ""}</dd>
+        </dl></details></div>`;
+    }).join("");
+    const agentSel = $("#f-agent"), cur = agentSel.value;
+    const names = [...new Set((extraHistory || s.history).map((t) => t.agent))].sort();
+    agentSel.innerHTML = `<option value="">all agents</option>` + names.map((n) => `<option${n === cur ? " selected" : ""}>${esc(n)}</option>`).join("");
+    $("#footer").textContent = `${s.host.name} · agentpipe status · ${s.queue.map((q) => q.project + " at " + q.path).join("; ")}`;
+  }
+
+  function renderHistory() {
+    if (!snapshot) return;
+    const rows = (extraHistory || snapshot.history).filter((t) => (!$("#f-status").value || t.status === $("#f-status").value) && (!$("#f-agent").value || t.agent === $("#f-agent").value) && (!$("#f-q").value || t.title.toLowerCase().includes($("#f-q").value.toLowerCase())));
+    $("#history").innerHTML = table(rows, "no finished tasks yet");
+    $("#hist-count").textContent = `${rows.length} shown`;
+  }
+
+  async function poll() {
+    $("#pill").className = "pill " + (online === false ? "offline" : online ? "online" : "checking");
+    try {
+      const res = await fetch(`/api/status?history=${historyLimit}`, { cache: "no-store", signal: AbortSignal.timeout(8000) });
+      if (!res.ok) throw new Error(res.status);
+      snapshot = await res.json();
+      try { localStorage.setItem(KEY, JSON.stringify(snapshot)); } catch {}
+      setOnline(true);
+      render(snapshot);
+    } catch (e) {
+      if (!snapshot) { try { snapshot = JSON.parse(localStorage.getItem(KEY) || "null"); } catch {} }
+      setOnline(false);
+      if (snapshot) render(snapshot);
+      else $("#tiles").innerHTML = `<p class="empty">No data yet. ${esc(String(e))}</p>`;
+    }
+  }
+
+  document.addEventListener("click", async (ev) => {
+    const row = ev.target.closest("tr.row");
+    if (!row || ev.target.closest("a")) return;
+    const next = row.nextElementSibling;
+    if (next && next.classList.contains("detail")) { next.remove(); return; }
+    const id = row.dataset.id;
+    const tr = document.createElement("tr");
+    tr.className = "detail";
+    tr.innerHTML = `<td colspan="6">loading #${id}…</td>`;
+    row.after(tr);
+    try {
+      const d = await (await fetch(`/api/task/${id}`, { signal: AbortSignal.timeout(8000) })).json();
+      const t = d.task;
+      tr.innerHTML = `<td colspan="6"><div><b>${esc(t.title)}</b> · ${esc(t.agent)} · priority ${t.priority} · attempts ${t.attempts}${t.parent_id ? ` · child of #${t.parent_id}` : ""}${t.depends_on.length ? ` · after ${t.depends_on.map((x) => "#" + x).join(", ")}` : ""}</div>
+        ${t.branch ? `<div class="small">branch ${esc(t.branch)}${t.base_branch ? " from " + esc(t.base_branch) : ""}</div>` : ""}${t.run_dir ? `<div class="small">run dir ${esc(t.run_dir)}</div>` : ""}
+        <pre>${esc(t.description)}</pre>${t.summary ? `<pre>${esc(t.summary)}</pre>` : ""}
+        ${d.children.length ? `<div class="small" style="margin-top:8px">children: ${d.children.map((c) => `#${c.id} ${esc(c.status)} ${esc(c.title)}`).join(" · ")}</div>` : ""}
+        <details><summary>events (${d.events.length})</summary><pre>${d.events.map((e) => esc(e.ts.slice(0, 19) + " " + e.kind + ": " + e.message)).join("\n")}</pre></details></td>`;
+    } catch (e) { tr.innerHTML = `<td colspan="6" class="empty">could not load #${id}: ${esc(String(e))}</td>`; }
+  });
+  $("#refresh").addEventListener("click", (e) => { e.preventDefault(); poll(); });
+  for (const id of ["#f-status", "#f-agent"]) $(id).addEventListener("change", renderHistory);
+  $("#f-q").addEventListener("input", renderHistory);
+  $("#more").addEventListener("click", async () => {
+    try { extraHistory = (await (await fetch(`/api/history?limit=1000`, { signal: AbortSignal.timeout(10000) })).json()).history; renderHistory(); } catch {}
+  });
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) poll(); });
+
+  if ("serviceWorker" in navigator && window.isSecureContext) {
+    navigator.serviceWorker.register("/sw.js").catch((e) => console.warn("service worker:", e));
+  } else if (location.protocol === "http:" && location.hostname !== "localhost") {
+    $("#secure-hint").hidden = false;
+    $("#https-link").href = `https://${location.hostname}:8443/`;
+  }
+  try { snapshot = JSON.parse(localStorage.getItem(KEY) || "null"); if (snapshot) render(snapshot); } catch {}
+  poll();
+  setInterval(poll, 20000);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,9 @@
+{
+  "name": "coder",
+  "description": "Implements one small, well-specified code change with unit tests: plans it, has the local model write it step by step, runs lint and tests, reviews, commits per step, and opens a pull request when green.",
+  "runtime": "pipeline",
+  "when_to_use": "Any concrete code change: a helper, a reducer case, a component tweak, a bug fix with a regression test. Not for open-ended design work or changes spanning many files.",
+  "inputs": "Exact files or areas, the behaviour to implement, names to use, what tests must exist or stay green. Mention e2e specs that cover the area.",
+  "outputs": "A branch agentpipe/<slug>-<date> with one commit per step, a report, and a pull request when the project pushes.",
+  "tags": ["code"]
+}

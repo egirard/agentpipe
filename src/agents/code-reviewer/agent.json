@@ -1,0 +1,23 @@
+{
+  "name": "code-reviewer",
+  "description": "Reviews a branch's full diff against the base for correctness, unmet requirements, unsafe changes and style, and files fix tasks for the coder when something must change.",
+  "runtime": "claude",
+  "when_to_use": "After a coder task on risky code (state, reducers, game rules, data migrations), or when a human asks for a second look at a branch. The pipeline already does a light final review, so skip it for trivial changes.",
+  "inputs": "The branch to review (set via 'branch' or 'after' the coder task) and what the change was supposed to achieve.",
+  "outputs": "A review report with findings by severity; subtasks for the coder when blockers or majors exist.",
+  "can_delegate": true,
+  "commits": false,
+  "context": [
+    "branch-diff",
+    "files",
+    "catalog"
+  ],
+  "max_turns": 30,
+  "tags": [
+    "review"
+  ],
+  "shell": [
+    "git-read",
+    "gh-read"
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "name": "unit-tester",
+  "description": "Adds unit tests for existing code without changing production files. Use where coverage is thin or before a risky refactor.",
+  "runtime": "pipeline",
+  "when_to_use": "Coverage gaps, characterisation tests before a refactor, regression tests for a bug already fixed. Not for writing the feature itself.",
+  "inputs": "Which module or functions to cover, the behaviours and edge cases that matter, the existing test file conventions to follow.",
+  "outputs": "A branch with new or extended *.test.ts files and a pull request when green.",
+  "task_prefix": "Write unit tests only. Do not change production source files; if the code is untestable as written, stop and explain instead of refactoring it.",
+  "tags": [
+    "test"
+  ],
+  "paths": [
+    "**/*.test.ts",
+    "**/*.test.tsx",
+    "**/*.spec.ts",
+    "**/*.spec.tsx",
+    "**/__tests__/**",
+    "test/**",
+    "tests/**",
+    "**/*.test.js"
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "name": "project-manager",
+  "description": "Reports on the state of the queue and open pull requests for a project, spots stalls, duplicates and dependency knots, and proposes reprioritisation or cleanup tasks.",
+  "runtime": "claude",
+  "when_to_use": "Periodic health check of the backlog, or when the human wants a status summary before deciding what to queue next. Not for technical decisions about code.",
+  "inputs": "Optionally a focus (a milestone, a set of task ids) and any deadlines.",
+  "outputs": "A status report; occasionally housekeeping subtasks (for example a gitbot task to reconcile stale branches).",
+  "can_delegate": true,
+  "commits": false,
+  "context": [
+    "queue",
+    "catalog"
+  ],
+  "max_turns": 30,
+  "tags": [
+    "management"
+  ],
+  "shell": [
+    "git-read",
+    "gh-read"
+  ]
+}
