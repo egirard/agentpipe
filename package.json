@@ -2,6 +2,7 @@
   "name": "agentpipe",
   "version": "0.1.0",
   "description": "Local-first coding pipeline: small Ollama models do the work, Claude plans and unblocks.",
+  "license": "Apache-2.0",
   "type": "module",
   "bin": { "agentpipe": "./src/cli.ts" },
   "scripts": {

@@ -319,3 +319,7 @@ every invocation with its turn count and the cost Claude Code reports.
 via rootless podman (or `CONTAINER_RUNTIME=docker`), with the repo bind-mounted and a container-private `node_modules` volume.
 The version comes from the repo's installed `@playwright/test`, so it always matches the lockfile,
 and the Chromium build matches what generated the committed Linux baselines.
+
+## License
+
+Apache License 2.0; see [LICENSE](LICENSE) and [NOTICE](NOTICE).
