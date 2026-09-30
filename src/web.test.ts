@@ -93,6 +93,7 @@ describe("write API", () => {
     store.update(t.id, { summary: "## Question\nShould the **modal** close on `Escape`?\n\nMore text." });
     store.setStatus(t.id, "attention");
     const s = await (await handler(new Request("http://mothership:8081/api/status"))).json();
+    expect(s.version.sha).toMatch(/^[0-9a-f]{7,}$/);
     expect(s.proposals.length).toBe(1);
     expect(s.proposals[0].proposal.runtime).toBe("claude");
     const row = s.queue[0].needsYou.find((x: any) => x.id === t.id);

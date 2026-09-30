@@ -225,7 +225,17 @@ details summary { cursor: pointer; color: var(--text-2); }
   const $ = (s) => document.querySelector(s);
   const KEY = "agentpipe-status-snapshot";
   const OFF = "agentpipe-status-offline-since";
-  let snapshot = null, online = null, historyLimit = 60, extraHistory = null;
+  const DRAFTS = "agentpipe-status-drafts";
+  const OPEN = "agentpipe-status-open";
+  let snapshot = null, online = null, historyLimit = 60, extraHistory = null, serverSha = null;
+
+  // What the reader typed and what they had open survive a reload (theirs, or the one this page
+  // does when the server was upgraded): drafts keyed by task id, plus the add form.
+  const store = { get(k, d) { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } }, set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} } };
+  const drafts = store.get(DRAFTS, { add: {}, replies: {} });
+  const saveDrafts = () => store.set(DRAFTS, drafts);
+  const openIds = () => [...document.querySelectorAll("tr.detail")].map((tr) => tr.dataset.id);
+  const saveOpen = () => store.set(OPEN, openIds());
 
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const age = (iso) => { if (!iso) return ""; const s = (Date.now() - Date.parse(iso)) / 1000; if (s < 0) return "now"; if (s < 90) return Math.round(s) + "s"; if (s < 5400) return Math.round(s / 60) + "m"; if (s < 172800) return Math.round(s / 3600) + "h"; return Math.round(s / 86400) + "d"; };
@@ -427,7 +437,12 @@ details summary { cursor: pointer; color: var(--text-2); }
       snapshot = await res.json();
       try { localStorage.setItem(KEY, JSON.stringify(snapshot)); } catch {}
       setOnline(true);
+      // The server was upgraded under this page: load the new page. Drafts and open rows are saved.
+      const sha = snapshot.version && snapshot.version.sha;
+      if (serverSha && sha && sha !== serverSha) { saveDrafts(); saveOpen(); location.reload(); return; }
+      if (sha) serverSha = sha;
       render(snapshot);
+      restoreOnce();
     } catch (e) {
       if (!snapshot) { try { snapshot = JSON.parse(localStorage.getItem(KEY) || "null"); } catch {} }
       setOnline(false);
@@ -438,7 +453,7 @@ details summary { cursor: pointer; color: var(--text-2); }
 
   async function refreshDetail(tr, data) {
     const id = tr.dataset.id;
-    const typed = tr.querySelector("form.reply-form textarea")?.value ?? "";
+    const typed = tr.querySelector("form.reply-form textarea")?.value ?? drafts.replies[id] ?? "";
     try {
       const d = data || await (await fetch(`/api/task/${id}`, { signal: AbortSignal.timeout(8000) })).json();
       if (d.error) throw new Error(d.error);
@@ -457,9 +472,15 @@ details summary { cursor: pointer; color: var(--text-2); }
       tr.dataset.id = id;
       tr.innerHTML = `<td colspan="6">loading #${id}…</td>`;
       row.after(tr);
+      saveOpen();
     }
     return refreshDetail(tr);
   }
+  document.addEventListener("input", (ev) => {
+    const el = ev.target;
+    if (el.matches("form.reply-form textarea")) { const id = el.closest("form").dataset.id; if (el.value) drafts.replies[id] = el.value; else delete drafts.replies[id]; saveDrafts(); }
+    else if (el.id === "add-desc" || el.id === "add-accept" || el.id === "add-prio") { drafts.add[el.id] = el.value; saveDrafts(); }
+  });
 
   function setNote(el, text, err) { if (!el) return; el.textContent = text || ""; el.classList.toggle("err", Boolean(err)); }
 
@@ -499,7 +520,7 @@ details summary { cursor: pointer; color: var(--text-2); }
     const row = ev.target.closest("tr.row");
     if (!row || ev.target.closest("a")) return;
     const next = row.nextElementSibling;
-    if (next && next.classList.contains("detail")) { next.remove(); return; }
+    if (next && next.classList.contains("detail")) { next.remove(); saveOpen(); return; }
     openDetail(row);
   });
 
@@ -514,6 +535,8 @@ details summary { cursor: pointer; color: var(--text-2); }
       submit.disabled = true;
       const r = await api(`/api/task/${form.dataset.id}/reply`, { text });
       setNote(note, r.note);
+      delete drafts.replies[form.dataset.id]; saveDrafts();
+      form.querySelector("textarea").value = "";
       await poll();
     } catch (e) { setNote(note, String(e.message || e), true); submit.disabled = false; }
   });
@@ -544,6 +567,7 @@ details summary { cursor: pointer; color: var(--text-2); }
       const r = await api("/api/tasks", { project: $("#add-project").value, agent: $("#add-agent").value, description: $("#add-desc").value, priority: $("#add-prio").value || null, acceptance: $("#add-accept").value.split("\n").map((x) => x.trim()).filter(Boolean) });
       setNote(note, `#${r.task.id} queued for ${r.task.agent} in ${r.task.project}${r.notes.length ? ". " + r.notes.join("; ") : ""}`);
       $("#add-desc").value = ""; $("#add-accept").value = ""; $("#add-prio").value = "";
+      drafts.add = {}; saveDrafts();
       await poll();
     } catch (e) { setNote(note, String(e.message || e), true); }
     finally { $("#add-submit").disabled = false; }
@@ -561,6 +585,14 @@ details summary { cursor: pointer; color: var(--text-2); }
   } else if (location.protocol === "http:" && location.hostname !== "localhost") {
     $("#secure-hint").hidden = false;
     $("#https-link").href = `https://${location.hostname}:8443/`;
+  }
+  let restored = false;
+  function restoreOnce() {
+    if (restored) return;
+    restored = true;
+    for (const id of ["add-desc", "add-accept", "add-prio"]) if (drafts.add[id]) $("#" + id).value = drafts.add[id];
+    if (drafts.add["add-desc"]) $("#add-panel").classList.add("show");
+    for (const id of store.get(OPEN, [])) { const row = document.querySelector(`tr.row[data-id="${id}"]`); if (row && !(row.nextElementSibling && row.nextElementSibling.classList.contains("detail"))) openDetail(row); }
   }
   try { snapshot = JSON.parse(localStorage.getItem(KEY) || "null"); if (snapshot) render(snapshot); } catch {}
   poll();

@@ -42,6 +42,16 @@ interface Check {
 
 const STATIC = path.join(agentpipeRoot(), "web");
 
+/** What is serving: the checkout's commit and when this process started. The page reloads itself when the commit changes. */
+const STARTED_AT = new Date().toISOString();
+let versionCache: { sha: string; startedAt: string } | null = null;
+async function serverVersion(): Promise<{ sha: string; startedAt: string }> {
+  if (versionCache) return versionCache;
+  const r = await sh("git rev-parse --short HEAD", agentpipeRoot(), 10);
+  versionCache = { sha: r.ok ? r.output.trim() : "unknown", startedAt: STARTED_AT };
+  return versionCache;
+}
+
 async function withTimeout<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
   let t: ReturnType<typeof setTimeout>;
   const timeout = new Promise<T>((r) => (t = setTimeout(() => r(fallback), ms)));
@@ -235,6 +245,7 @@ export async function collectStatus(store: Store, gcfg: GlobalConfig, o: WebOpts
   return {
     ok: true,
     ts: new Date().toISOString(),
+    version: await serverVersion(),
     host: { name: os.hostname(), uptimeSec: Math.round(os.uptime()), load: os.loadavg().map((x) => Math.round(x * 100) / 100), mem, cpus: os.cpus().length },
     gpu,
     disks,
@@ -464,6 +475,12 @@ export function createHandler(store: Store, gcfg: GlobalConfig, o: WebOpts, tls:
 
       if (url.pathname === "/api/status") {
         const limit = Math.min(500, Number(url.searchParams.get("history") ?? 40) || 40);
+        // Projects are added, paused and switched from the CLI while this server runs: re-read every time, keep the last good copy on a half-written file.
+        try {
+          gcfg = loadGlobalConfig();
+        } catch (e) {
+          log(`web: config unreadable, keeping the previous one: ${(e as Error).message}`);
+        }
         return Response.json(await collectStatus(store, gcfg, o, limit), { headers });
       }
       if (url.pathname === "/api/history") {
