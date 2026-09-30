@@ -95,6 +95,25 @@ export const DENY: [RegExp, string][] = [
   [/\bcd\s+(\/|~|\.\.)/, "leaving the checkout"],
 ];
 
+/**
+ * Deny entries that stay in force for steps a human approved (requires_confirmation agents). The
+ * git/gh state-changing entries are exactly what those agents exist for, so they are lifted; the
+ * rest (privilege escalation, deleting trees, network shells, sysadmin, indirect execution,
+ * credentials) stay, because a human skimming a command list should not be the only defence.
+ */
+export const APPROVED_DENY: [RegExp, string][] = DENY.filter(([, why]) => !why.startsWith("git command") && !why.startsWith("gh command") && !why.startsWith("writing to a file") && why !== "indirect execution").concat([
+  // As in DENY, except `source` counts only as a command, so `gh repo create --source .` passes.
+  [/\b(eval|exec|bash\s+-c|sh\s+-c|zsh\s+-c|xargs\s+(?!-0\s+echo))\b|(^|[;&|]\s*)source\s|(^|\s)\.\s+\//, "indirect execution"],
+]);
+
+/** Whether an approved-by-a-human command may run at all. Only the hard deny list applies; no allow list. */
+export function checkApprovedCommand(command: string): PolicyVerdict {
+  const cmd = command.trim();
+  if (!cmd) return { ok: false, reason: "empty command" };
+  for (const [re, why] of APPROVED_DENY) if (re.test(cmd)) return { ok: false, reason: `${why} (${re.source.slice(0, 40)}...)` };
+  return { ok: true };
+}
+
 export interface PolicyVerdict {
   ok: boolean;
   reason?: string;

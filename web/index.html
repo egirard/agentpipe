@@ -130,6 +130,21 @@ tr.cancelled .ask, tr.failed .ask { color: var(--text-2); }
 .proposal .why { margin: 6px 0; }
 .proposal code { font-family: var(--mono); font-size: 12px; background: var(--surface); padding: 1px 5px; border-radius: 4px; }
 .badge.cancelled { color: var(--muted); border-style: dashed; }
+#update { display: none; margin: 16px 0 0; padding: 12px 14px; border-radius: 8px; border: 1px solid var(--accent); background: var(--accent-soft); }
+#update.show { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; }
+#update .commits { flex-basis: 100%; font-size: 13px; color: var(--text-2); }
+.confirm { border: 1px solid var(--warning); border-radius: 8px; padding: 10px 12px; margin: 10px 0; background: color-mix(in srgb, var(--warning) 8%, var(--surface)); }
+.confirm h4 { margin: 0 0 6px; font-size: 15px; }
+.confirm .row { font-size: 13px; margin: 3px 0; }
+.confirm .row b { color: var(--text-2); font-weight: 600; }
+.confirm ol { margin: 6px 0 0; padding-left: 22px; }
+.confirm li { margin: 4px 0; font-size: 13px; }
+.confirm li code { font-family: var(--mono); font-size: 12.5px; background: var(--surface); padding: 1px 6px; border-radius: 4px; overflow-wrap: anywhere; }
+.confirm li .cwd { color: var(--muted); font-size: 12px; }
+.confirm .log { margin-top: 6px; font-family: var(--mono); font-size: 12px; white-space: pre-wrap; color: var(--text-2); }
+.confirm.approved { border-color: var(--good); background: color-mix(in srgb, var(--good) 7%, var(--surface)); }
+.confirm.failed, .confirm.rejected { border-color: var(--critical); background: color-mix(in srgb, var(--critical) 7%, var(--surface)); }
+.confirm.running { border-color: var(--accent); }
 details summary { cursor: pointer; color: var(--text-2); }
 .empty { color: var(--muted); font-style: italic; }
 .small { font-size: 13px; color: var(--text-2); }
@@ -151,6 +166,7 @@ details summary { cursor: pointer; color: var(--text-2); }
   </header>
 
   <div id="banner"><strong>mothership is not answering.</strong> <span id="banner-text"></span></div>
+  <div id="update"><strong>Update available.</strong> <span id="update-text"></span><button class="primary" type="button" id="upgrade">Upgrade now</button><span class="note" id="update-note"></span><div class="commits" id="update-commits"></div></div>
   <p class="small" id="secure-hint" hidden>To keep this page available while the box is down, open the <a id="https-link" href="#">HTTPS version</a> once and trust its certificate (<a href="/ca.crt">download</a>: Windows → Install Certificate → Current User → Trusted Root Certification Authorities).</p>
 
   <h2>Queue <button class="act primary" id="add-toggle" type="button">+ Add task</button></h2>
@@ -244,6 +260,24 @@ details summary { cursor: pointer; color: var(--text-2); }
   const thead = `<thead><tr><th>id</th><th>status</th><th>agent</th><th>task</th><th class="num">took</th><th class="num">when</th></tr></thead>`;
   function table(rows, empty) { return rows.length ? `<table>${thead}<tbody>${rows.map(taskLine).join("")}</tbody></table>` : `<p class="empty">${esc(empty)}</p>`; }
 
+  // Re-rendering a list must not close what the reader opened or lose what they typed: open
+  // detail rows are DOM nodes that are lifted out, the table is rebuilt only when its rows
+  // changed, and the nodes are put back under their rows (wherever the row moved to). A detail
+  // whose task changed status is refreshed in place, keeping any half-written reply.
+  const details = new Map();
+  function setTable(container, rows, empty) {
+    const html = table(rows, empty);
+    for (const tr of container.querySelectorAll("tr.detail")) { details.set(tr.dataset.id, tr); tr.remove(); }
+    if (container.dataset.html !== html) { container.innerHTML = html; container.dataset.html = html; }
+    for (const row of container.querySelectorAll("tr.row")) {
+      const d = details.get(row.dataset.id);
+      if (!d) continue;
+      row.after(d);
+      details.delete(row.dataset.id);
+      if (d.dataset.status && d.dataset.status !== row.className.replace("row ", "")) refreshDetail(d);
+    }
+  }
+
   function render(s) {
     $("#hostname").textContent = s.host.name;
     document.title = s.host.name + " status";
@@ -277,9 +311,15 @@ details summary { cursor: pointer; color: var(--text-2); }
     if (s.ollama) meters.push(`<div class="meter"><div class="row"><span>Ollama models</span><b>${s.ollama.loaded.length ? "loaded: " + esc(s.ollama.loaded.join(", ")) : "idle"}</b></div><div class="small">${s.ollama.models.map((x) => esc(x.name)).join(", ")}</div></div>`);
     $("#meters").innerHTML = meters.join("");
     const inflight = s.queue.flatMap((q) => [...q.running, ...q.next]);
-    $("#inflight").innerHTML = table(inflight, "queue is empty");
+    setTable($("#inflight"), inflight, "queue is empty");
     const needsYou = s.queue.flatMap((q) => q.needsYou);
-    $("#needsyou").innerHTML = table(needsYou, "nothing waiting on a human");
+    setTable($("#needsyou"), needsYou, "nothing waiting on a human");
+    const u = s.update;
+    $("#update").classList.toggle("show", Boolean(u && u.available));
+    if (u && u.available) {
+      $("#update-text").textContent = `${u.behind} commit${u.behind === 1 ? "" : "s"} behind origin/${u.branch} (${u.local} → ${u.remote}).${u.dirty ? " The checkout has local changes; the upgrade will refuse until they are committed." : ""}`;
+      $("#update-commits").textContent = u.commits.join(" · ");
+    }
     renderHistory();
     $("#architect").innerHTML = s.queue.map((q) => `<div class="small">${esc(q.project)}: last review ${q.lastReview ? when(q.lastReview) + " (" + age(q.lastReview) + " ago)" : "never"}${q.push ? " · pull requests on" : " · pull requests off"}</div>`).join("")
       + (s.architect.timer ? `<div class="small">timer ${s.architect.timer.active ? "active, next " + esc(s.architect.timer.next) : "inactive"}</div>` : "")
@@ -340,6 +380,19 @@ details summary { cursor: pointer; color: var(--text-2); }
   }
 
   const STOPPED = new Set(["attention", "failed", "cancelled", "blocked"]);
+  function confirmHtml(t) {
+    const c = t.confirmation;
+    if (!c) return "";
+    const r = c.request;
+    const step = (st, i) => `<li>${st.kind === "command" ? `<code>${esc(st.command)}</code> <span class="cwd">in ${esc(st.cwd || "the project checkout")}</span>` : `write <code>${esc(st.path)}</code> (${(st.content || "").length} chars) <details><summary>content</summary><pre>${esc(st.content || "")}</pre></details>`}<div class="small">${esc(st.why)}</div></li>`;
+    const pending = c.status === "pending";
+    return `<div class="confirm ${esc(c.status)}"><h4>${pending ? "Needs your approval: " : `${esc(c.status)}${c.decided_by ? " by " + esc(c.decided_by) : ""}: `}${esc(r.title)}</h4>
+      <div class="row"><b>why</b> ${esc(r.why)}</div><div class="row"><b>risk</b> ${esc(r.risk)}</div>
+      ${r.links && r.links.length ? `<div class="row"><b>see</b> ${r.links.map((l) => /^https?:/.test(l) ? `<a href="${esc(l)}" target="_blank" rel="noopener">${esc(l)}</a>` : esc(l)).join(", ")}</div>` : ""}
+      <div class="row"><b>steps</b> run in order as you; a failing step stops the rest${r.continue_after ? "; then the agent runs again with the outputs" : "; then the task is done"}</div><ol>${r.steps.map(step).join("")}</ol>
+      ${c.log.length ? `<div class="log">${c.log.map(esc).join("\n")}</div>` : ""}
+      ${pending ? `<div class="actions"><button class="primary" type="button" data-action="approve" data-id="${t.id}">Approve and run</button><button class="danger" type="button" data-action="reject" data-id="${t.id}">Reject</button><span class="note"></span></div>` : c.status === "running" ? `<div class="note">running…</div>` : ""}</div>`;
+  }
   function detailHtml(d) {
     const t = d.task;
     const canRetry = ["attention", "failed", "cancelled"].includes(t.status);
@@ -348,6 +401,7 @@ details summary { cursor: pointer; color: var(--text-2); }
     return `<td colspan="6"><div><b>${esc(t.title)}</b> · ${badge(t.status)} · ${esc(t.agent)} · priority ${t.priority} · attempts ${t.attempts}${t.parent_id ? ` · child of #${t.parent_id}` : ""}${t.depends_on.length ? ` · after ${t.depends_on.map((x) => "#" + x).join(", ")}` : ""}${t.cost_usd ? ` · $${Number(t.cost_usd).toFixed(2)}` : ""}</div>
       ${t.branch ? `<div class="small">branch ${esc(t.branch)}${t.base_branch ? " from " + esc(t.base_branch) : ""}${t.pr_url ? ` · <a href="${esc(t.pr_url)}" target="_blank" rel="noopener">pull request</a>` : ""}</div>` : ""}${t.run_dir ? `<div class="small">run dir ${esc(t.run_dir)}</div>` : ""}
       ${t.error ? `<div class="small" style="color:var(--critical-text);margin-top:4px">${esc(t.error)}</div>` : ""}
+      ${confirmHtml(t)}
       <details${stopped ? "" : " open"}><summary>task description</summary><pre>${esc(t.description)}</pre></details>
       ${t.summary ? `<details${stopped ? " open" : ""}><summary>${t.status === "attention" ? "what the agent asks" : "agent report"}</summary><pre>${esc(t.summary)}</pre></details>` : ""}
       ${d.report && d.report !== t.summary ? `<details><summary>run report (report.md)</summary><pre>${esc(d.report)}</pre></details>` : ""}
@@ -361,7 +415,7 @@ details summary { cursor: pointer; color: var(--text-2); }
   function renderHistory() {
     if (!snapshot) return;
     const rows = (extraHistory || snapshot.history).filter((t) => (!$("#f-status").value || t.status === $("#f-status").value) && (!$("#f-agent").value || t.agent === $("#f-agent").value) && (!$("#f-q").value || t.title.toLowerCase().includes($("#f-q").value.toLowerCase())));
-    $("#history").innerHTML = table(rows, "no finished tasks yet");
+    setTable($("#history"), rows, "no finished tasks yet");
     $("#hist-count").textContent = `${rows.length} shown`;
   }
 
@@ -373,9 +427,7 @@ details summary { cursor: pointer; color: var(--text-2); }
       snapshot = await res.json();
       try { localStorage.setItem(KEY, JSON.stringify(snapshot)); } catch {}
       setOnline(true);
-      const open = openIds();
       render(snapshot);
-      reopen(open);
     } catch (e) {
       if (!snapshot) { try { snapshot = JSON.parse(localStorage.getItem(KEY) || "null"); } catch {} }
       setOnline(false);
@@ -384,25 +436,30 @@ details summary { cursor: pointer; color: var(--text-2); }
     }
   }
 
-  async function openDetail(row) {
+  async function refreshDetail(tr, data) {
+    const id = tr.dataset.id;
+    const typed = tr.querySelector("form.reply-form textarea")?.value ?? "";
+    try {
+      const d = data || await (await fetch(`/api/task/${id}`, { signal: AbortSignal.timeout(8000) })).json();
+      if (d.error) throw new Error(d.error);
+      tr.innerHTML = detailHtml(d);
+      tr.dataset.status = d.task.status;
+      if (typed) tr.querySelector("form.reply-form textarea").value = typed;
+      if (d.task.confirmation && d.task.confirmation.status === "running") setTimeout(() => { if (tr.isConnected) refreshDetail(tr); }, 3000);
+    } catch (e) { tr.innerHTML = `<td colspan="6" class="empty">could not load #${id}: ${esc(String(e))}</td>`; }
+  }
+  function openDetail(row) {
     const id = row.dataset.id;
     let tr = row.nextElementSibling;
     if (!tr || !tr.classList.contains("detail")) {
       tr = document.createElement("tr");
       tr.className = "detail";
+      tr.dataset.id = id;
       tr.innerHTML = `<td colspan="6">loading #${id}…</td>`;
       row.after(tr);
     }
-    try {
-      const d = await (await fetch(`/api/task/${id}`, { signal: AbortSignal.timeout(8000) })).json();
-      if (d.error) throw new Error(d.error);
-      tr.innerHTML = detailHtml(d);
-    } catch (e) { tr.innerHTML = `<td colspan="6" class="empty">could not load #${id}: ${esc(String(e))}</td>`; }
+    return refreshDetail(tr);
   }
-
-  // Detail rows keep their place across polls: after a re-render, reopen the ones that were open.
-  const openIds = () => [...document.querySelectorAll("tr.detail")].map((tr) => tr.previousElementSibling?.dataset.id).filter(Boolean);
-  function reopen(ids) { for (const id of ids) { const row = document.querySelector(`tr.row[data-id="${id}"]`); if (row) openDetail(row); } }
 
   function setNote(el, text, err) { if (!el) return; el.textContent = text || ""; el.classList.toggle("err", Boolean(err)); }
 
@@ -422,6 +479,17 @@ details summary { cursor: pointer; color: var(--text-2); }
           setNote(note, r.note);
         } else if (action === "retry") {
           const r = await api(`/api/task/${id}/retry`);
+          setNote(note, r.note);
+        } else if (action === "approve") {
+          if (!confirm(`Approve #${id}? The listed steps run now, as you.`)) { btn.disabled = false; return; }
+          const r = await api(`/api/task/${id}/approve`);
+          setNote(note, r.note);
+          const tr = btn.closest("tr.detail");
+          if (tr) await refreshDetail(tr, r);
+        } else if (action === "reject") {
+          const reason = prompt(`Reject #${id}? Say why (the task is cancelled with this reason).`, "");
+          if (reason === null) { btn.disabled = false; return; }
+          const r = await api(`/api/task/${id}/reject`, { reason });
           setNote(note, r.note);
         }
         await poll();
@@ -450,6 +518,22 @@ details summary { cursor: pointer; color: var(--text-2); }
     } catch (e) { setNote(note, String(e.message || e), true); submit.disabled = false; }
   });
 
+  $("#upgrade").addEventListener("click", async () => {
+    const note = $("#update-note"), btn = $("#upgrade");
+    if (!confirm("Upgrade agentpipe on the box now? It pulls, installs, and restarts the worker and this page's server. A running task would be interrupted and requeued.")) return;
+    try {
+      btn.disabled = true;
+      setNote(note, "pulling…");
+      let r;
+      try { r = await api("/api/upgrade", {}); }
+      catch (e) {
+        if (!/running/.test(String(e.message)) || !confirm(`${e.message}\n\nInterrupt them and upgrade anyway?`)) throw e;
+        r = await api("/api/upgrade", { force: true });
+      }
+      setNote(note, r.lines.join(" · ") + (r.restarted === "scheduled" ? " · restarting, the page reconnects in a moment" : ""));
+      setTimeout(poll, 6000);
+    } catch (e) { setNote(note, String(e.message || e), true); btn.disabled = false; }
+  });
   $("#add-toggle").addEventListener("click", () => { $("#add-panel").classList.toggle("show"); if ($("#add-panel").classList.contains("show")) $("#add-desc").focus(); });
   $("#add-cancel").addEventListener("click", () => $("#add-panel").classList.remove("show"));
   $("#add-panel").addEventListener("submit", async (ev) => {

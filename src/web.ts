@@ -1,11 +1,12 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { addTask, cancelTask, replyToTask, retryTask, viewProposal } from "./actions.ts";
+import { addTask, approveTask, cancelTask, rejectTask, replyToTask, retryTask, viewProposal } from "./actions.ts";
 import { latestDigest } from "./architect.ts";
 import { agentpipeRoot, currentProject, dataDir, loadGlobalConfig, projectStatus, type GlobalConfig } from "./global.ts";
 import { loadRegistry } from "./registry.ts";
 import type { Store, Task } from "./store.ts";
+import { checkForUpdate, runUpgrade } from "./upgrade.ts";
 import { clip, log, setLogFile, sh } from "./util.ts";
 
 /**
@@ -130,7 +131,8 @@ function taskRow(t: Task) {
     pr_url: t.pr_url,
     error: t.error ? t.error.slice(0, 300) : null,
     /** What the agent is asking or reporting, for tasks that stopped; null otherwise. */
-    ask: t.status === "attention" || t.status === "cancelled" || t.status === "failed" ? summaryHead(t.summary) : null,
+    ask: t.confirmation?.status === "pending" ? `approve: ${t.confirmation.request.title}` : t.status === "attention" || t.status === "cancelled" || t.status === "failed" ? summaryHead(t.summary) : null,
+    confirmation: t.confirmation ? { title: t.confirmation.request.title, status: t.confirmation.status, steps: t.confirmation.request.steps.length } : null,
     created_by: t.created_by,
     round: t.round,
     attempts: t.attempts,
@@ -152,10 +154,11 @@ export function taskDetail(store: Store, id: number) {
 
 
 export async function collectStatus(store: Store, gcfg: GlobalConfig, o: WebOpts, historyLimit = 40) {
-  const [gpu, disks, timer, tags, ps, webui] = await Promise.all([
+  const [gpu, disks, timer, update, tags, ps, webui] = await Promise.all([
     probeGpu(),
     probeDisks(),
     probeTimer(),
+    withTimeout(checkForUpdate(), 70_000, null),
     fetchJson(`${o.ollamaUrl}/api/tags`),
     fetchJson(`${o.ollamaUrl}/api/ps`),
     (async () => {
@@ -197,7 +200,7 @@ export async function collectStatus(store: Store, gcfg: GlobalConfig, o: WebOpts
   const history = store.db
     .query(`SELECT * FROM tasks WHERE status IN ('done','attention','failed','cancelled') ORDER BY COALESCE(finished_at, created_at) DESC LIMIT ?`)
     .all(historyLimit)
-    .map((r: any) => taskRow({ ...r, depends_on: JSON.parse(r.depends_on || "[]"), files: JSON.parse(r.files || "[]") }));
+    .map((r: any) => taskRow(store.fromRow(r)!));
   const totals = store.counts();
   const today = store.spendToday();
   const week = store.spend(new Date(Date.now() - 7 * 86400_000).toISOString());
@@ -219,6 +222,10 @@ export async function collectStatus(store: Store, gcfg: GlobalConfig, o: WebOpts
   const stuck = queue.flatMap((q) => q.running).filter((t) => t.started_at && Date.now() - Date.parse(t.started_at) > 3 * 3600_000);
   if (stuck.length) checks.push({ name: "Long-running task", ok: false, level: "warning", detail: stuck.map((t) => `#${t.id} running since ${t.started_at}`).join("; ") });
   if (registry.problems.length) checks.push({ name: "Agent registry", ok: false, level: "warning", detail: registry.problems.join("; ") });
+  if (update?.available) checks.push({ name: "Update available", ok: false, level: "warning", detail: `${update.behind} commit(s) behind origin/${update.branch}: ${update.commits.slice(0, 3).join("; ")}${update.commits.length > 3 ? "; …" : ""}. Upgrade from the banner above or: agentpipe upgrade` });
+  else if (update?.error) checks.push({ name: "Update check", ok: false, level: "warning", detail: update.error });
+  const approvals = queue.flatMap((q) => q.needsYou).filter((t) => t.confirmation?.status === "pending");
+  if (approvals.length) checks.push({ name: "Awaiting your approval", ok: false, level: "warning", detail: approvals.map((t) => `#${t.id} ${t.confirmation!.title}`).join("; ") });
   if (gcfg.budgets.dailyUsd) checks.push({ name: "Daily Claude budget", ok: today < gcfg.budgets.dailyUsd, level: today >= gcfg.budgets.dailyUsd ? "warning" : today >= gcfg.budgets.dailyUsd * 0.8 ? "warning" : "good", detail: `$${today.toFixed(2)} of $${gcfg.budgets.dailyUsd} today; $${week.total.toFixed(2)} this week` });
   for (const a of registry.agents.values()) {
     const h = store.agentHealth(a.name, gcfg.budgets.agentWindow);
@@ -234,6 +241,7 @@ export async function collectStatus(store: Store, gcfg: GlobalConfig, o: WebOpts
     ollama: tags ? { models: (tags.models ?? []).map((m: any) => ({ name: m.name, sizeBytes: m.size })), loaded } : null,
     worker: { pid: workerPid, logAgeSec: workerLogAge },
     architect: { timer, digestFile: digest?.file ?? null, digestAt: digest ? statSync(digest.file).mtime.toISOString() : null, digestExcerpt: digest ? digest.text.slice(0, 2500) : null },
+    update,
     links: { webui: o.webuiUrl },
     budgets: { todayUsd: Math.round(today * 100) / 100, weekUsd: Math.round(week.total * 100) / 100, weekCalls: week.calls, dailyCapUsd: gcfg.budgets.dailyUsd, taskCapUsd: gcfg.budgets.taskUsd, byAgent: week.byAgent, byProject: week.byProject },
     lanes: Object.entries(gcfg.worker.lanes).map(([lane, slots]) => ({ lane, slots, running: store.list({ status: ["running"] }).filter((t) => t.lane === lane).map((t) => t.id) })),
@@ -408,10 +416,29 @@ export function createHandler(store: Store, gcfg: GlobalConfig, o: WebOpts, tls:
           log(`web: ${by} queued #${task.id} for ${task.agent} in ${task.project}: ${task.title}`);
           return Response.json({ ok: true, task: taskRow(task), notes }, { status: 201, headers });
         }
-        const tm = url.pathname.match(/^\/api\/task\/(\d+)\/(reply|retry|cancel)$/);
+        if (url.pathname === "/api/upgrade") {
+          const b = await jsonBody(req);
+          const r = await runUpgrade(store, { force: b.force === true, restart: "scheduled" });
+          log(`web: ${by} upgrade: ${r.lines.join(" | ")}`);
+          return Response.json({ ok: r.ok, lines: r.lines, restarted: r.restarted }, { status: r.ok ? 200 : 409, headers });
+        }
+        const tm = url.pathname.match(/^\/api\/task\/(\d+)\/(reply|retry|cancel|approve|reject)$/);
         if (tm) {
           const id = Number(tm[1]);
           const b = await jsonBody(req);
+          if (tm[2] === "approve") {
+            // Marks the request running synchronously, then the steps run while the page polls the task.
+            const p = approveTask(store, fresh, id, by);
+            await Promise.race([p, new Promise((r) => setTimeout(r, 1500))]);
+            p.then((r) => log(`web: ${by} approved #${id}: ${r.ok ? "ok" : "FAILED"} (${r.log[r.log.length - 1]})`)).catch((e) => log(`web: approval of #${id} crashed: ${(e as Error).message}`));
+            const t = store.get(id)!;
+            return Response.json({ ok: true, task: taskRow(t), note: t.confirmation?.status === "running" ? "approved; the steps are running, watch the events" : `approved; ${t.confirmation?.status}`, ...taskDetail(store, id) }, { headers });
+          }
+          if (tm[2] === "reject") {
+            const c = rejectTask(store, id, by, typeof b.reason === "string" ? b.reason : null);
+            log(`web: ${by} rejected #${id}`);
+            return Response.json({ ok: true, task: taskRow(c.task), note: `#${id} rejected and cancelled` }, { headers });
+          }
           if (tm[2] === "reply") {
             const r = replyToTask(store, id, typeof b.text === "string" ? b.text : "", by, { requeue: b.requeue !== false });
             log(`web: ${by} replied to #${id}${r.requeued ? " (requeued)" : ""}`);
@@ -445,7 +472,7 @@ export function createHandler(store: Store, gcfg: GlobalConfig, o: WebOpts, tls:
         const rows = store.db
           .query(`SELECT * FROM tasks WHERE status IN ('done','attention','failed','cancelled') ${project ? "AND project = ?" : ""} ORDER BY COALESCE(finished_at, created_at) DESC LIMIT ?`)
           .all(...(project ? [project, limit] : [limit]))
-          .map((r: any) => taskRow({ ...r, depends_on: JSON.parse(r.depends_on || "[]"), files: JSON.parse(r.files || "[]") }));
+          .map((r: any) => taskRow(store.fromRow(r)!));
         return Response.json({ history: rows }, { headers });
       }
       if (url.pathname === "/api/agents") return Response.json({ agents: agentCatalog(store, loadRegistry(), gcfg), problems: loadRegistry().problems }, { headers });
@@ -493,10 +520,10 @@ export async function runWeb(store: Store, gcfg: GlobalConfig, o: WebOpts) {
   const tls = await ensureCert();
   const handler = createHandler(store, gcfg, o, tls);
 
-  const http = Bun.serve({ hostname: o.host, port: o.port, fetch: handler, idleTimeout: 30 });
+  const http = Bun.serve({ hostname: o.host, port: o.port, fetch: handler, idleTimeout: 120 });
   log(`web: http://${os.hostname()}:${http.port}/  (also by IP)`);
   if (tls) {
-    const https = Bun.serve({ hostname: o.host, port: o.tlsPort, fetch: handler, idleTimeout: 30, tls: { cert: Bun.file(tls.cert), key: Bun.file(tls.key) } });
+    const https = Bun.serve({ hostname: o.host, port: o.tlsPort, fetch: handler, idleTimeout: 120, tls: { cert: Bun.file(tls.cert), key: Bun.file(tls.key) } });
     log(`web: https://${os.hostname()}:${https.port}/  (trust /ca.crt once for the offline-capable page)`);
   }
   const stop = () => {

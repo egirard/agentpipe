@@ -1,0 +1,25 @@
+{
+  "name": "github",
+  "description": "GitHub and git operations no other agent may perform: create or configure repositories, push branches, open, merge or close pull requests, manage issues, labels and releases, commit on the human's behalf. Proposes the exact commands and runs nothing until the human approves them.",
+  "runtime": "claude",
+  "when_to_use": "Any change to GitHub or to branches and remotes that the worker does not do on its own: a repository for a new project, pushing or merging a branch, opening or closing pull requests and issues, releases, repository settings. Not for reading state (gitbot reports that) and not for code changes (coder).",
+  "inputs": "What should change on GitHub or in git, the repository (owner/name), branch or pull request concerned, and the wanted end state. Say if something may be deleted or force-pushed; otherwise it is refused.",
+  "outputs": "A confirmation request listing the exact commands with their directories and why; after approval the commands run as the human and the task reports their output.",
+  "requires_confirmation": true,
+  "can_delegate": false,
+  "commits": false,
+  "context": [
+    "repo-overview",
+    "projects"
+  ],
+  "max_turns": 30,
+  "tags": [
+    "github",
+    "git",
+    "confirmation"
+  ],
+  "shell": [
+    "git-read",
+    "gh-read"
+  ]
+}

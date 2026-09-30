@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
 import path from "node:path";
 import { dataDir } from "./global.ts";
+import type { ConfirmationRequest } from "./result.ts";
 
 /**
  * The task queue. One SQLite file, no server. Tasks form a tree: a delegating agent (the
@@ -24,6 +25,17 @@ export const OPEN_STATUSES: TaskStatus[] = ["queued", "blocked", "running", "wai
 export const TERMINAL_STATUSES: TaskStatus[] = ["done", "attention", "failed", "cancelled", "blocked"];
 /** Statuses that make dependants wait forever unless somebody intervenes. */
 const BAD_STATUSES: TaskStatus[] = ["attention", "failed", "cancelled"];
+
+/** A confirmation request on a task: what the agent proposed, whether the human decided, what happened. */
+export interface Confirmation {
+  request: ConfirmationRequest;
+  status: "pending" | "running" | "approved" | "rejected" | "failed" | "superseded";
+  requested_at: string;
+  decided_by?: string;
+  decided_at?: string;
+  /** One line per executed step, with exit code and clipped output. */
+  log: string[];
+}
 
 export interface Task {
   id: number;
@@ -59,6 +71,8 @@ export interface Task {
   cost_usd: number;
   lane: string | null;
   worktree: string | null;
+  /** Set when an agent with requires_confirmation asked for approval. */
+  confirmation: Confirmation | null;
 }
 
 export interface NewTask {
@@ -210,6 +224,7 @@ const MIGRATIONS: [string, string][] = [
   ["cost_usd", "REAL NOT NULL DEFAULT 0"],
   ["lane", "TEXT"],
   ["worktree", "TEXT"],
+  ["confirmation", "TEXT"],
 ];
 
 function now(): string {
@@ -233,9 +248,14 @@ export class Store {
     this.db.close();
   }
 
+  /** A raw `tasks` row (from a query written elsewhere) as a Task, with its JSON columns parsed. */
+  fromRow(r: any): Task | null {
+    return this.row(r);
+  }
+
   private row(r: any): Task | null {
     if (!r) return null;
-    return { ...r, depends_on: JSON.parse(r.depends_on || "[]"), files: JSON.parse(r.files || "[]"), acceptance: JSON.parse(r.acceptance || "[]"), cost_usd: r.cost_usd ?? 0 } as Task;
+    return { ...r, depends_on: JSON.parse(r.depends_on || "[]"), files: JSON.parse(r.files || "[]"), acceptance: JSON.parse(r.acceptance || "[]"), cost_usd: r.cost_usd ?? 0, confirmation: r.confirmation ? JSON.parse(r.confirmation) : null } as Task;
   }
 
   add(t: NewTask): Task {
@@ -313,13 +333,13 @@ export class Store {
     return OPEN_STATUSES.reduce((n, s) => n + c[s], 0);
   }
 
-  update(id: number, patch: Partial<Omit<Task, "id" | "depends_on" | "files" | "acceptance">> & { depends_on?: number[]; files?: string[]; acceptance?: string[] }): Task {
+  update(id: number, patch: Partial<Omit<Task, "id" | "depends_on" | "files" | "acceptance" | "confirmation">> & { depends_on?: number[]; files?: string[]; acceptance?: string[]; confirmation?: Confirmation | null }): Task {
     const cols: string[] = [];
     const params: any[] = [];
     for (const [k, v] of Object.entries(patch)) {
       if (v === undefined) continue;
       cols.push(`${k} = ?`);
-      params.push(k === "depends_on" || k === "files" || k === "acceptance" ? JSON.stringify(v) : v);
+      params.push(k === "depends_on" || k === "files" || k === "acceptance" ? JSON.stringify(v) : k === "confirmation" ? (v === null ? null : JSON.stringify(v)) : v);
     }
     if (cols.length) this.db.query(`UPDATE tasks SET ${cols.join(", ")} WHERE id = ?`).run(...params, id);
     return this.get(id)!;
@@ -475,12 +495,18 @@ export class Store {
     const t = this.get(id);
     if (!t) throw new Error(`no task #${id}`);
     this.update(id, { error: null, triaged: 0 });
+    // A request nobody decided on is moot once the agent runs again; it will ask afresh if it must.
+    if (t.confirmation?.status === "pending") this.setConfirmation(id, { ...t.confirmation, status: "superseded" });
     const out = this.setStatus(id, "queued", message);
     if (t.parent_id) {
       const parent = this.get(t.parent_id);
       if (parent && (parent.status === "review" || parent.status === "attention")) this.setStatus(parent.id, "waiting", `child #${id} was requeued`);
     }
     return out;
+  }
+
+  setConfirmation(id: number, c: Confirmation | null): Task {
+    return this.update(id, { confirmation: c });
   }
 
   /* ---------- replies: the human answering an agent ---------- */

@@ -75,7 +75,9 @@ agentpipe list                               # open tasks (--all for everything,
 agentpipe show 42                            # record, summary, replies, children, event log
 agentpipe reply 42 "Blue, like the other primary buttons"   # answer a task that asked something; it continues with your answer
 agentpipe retry 42 | cancel 42 --reason "needs a DB we do not have" | prio 42 10
+agentpipe approve 42 | reject 42 --reason "not yet"   # decide what a github or agent-creator task proposed
 agentpipe digest                             # the architect's latest write-up
+agentpipe upgrade [--check]                  # on the box: pull the deployed checkout, bun install, restart the units
 agentpipe agents proposals                   # agents the architect wished it had; create one: agentpipe agents new NAME --from ID
 journalctl --user -u agentpipe-worker -f     # live worker log (also ~/.local/share/agentpipe/worker.log)
 systemctl --user start agentpipe-architect   # wake the architect now instead of waiting for the timer
@@ -99,12 +101,30 @@ run directory with full logs. Three ways out:
 
 Coder tasks that went green have a pull request link in `pr_url`; merging is always a human action.
 
-When the architect cannot delegate part of a goal because no registered agent has the skill, it
-does not stretch an existing agent: it plans what it can and records an **agent proposal** (name,
-runtime, what it would do, why). Proposals show up in the digest, on the status page under
-"Suggested agents", and in `agentpipe agents proposals`. Nothing is created automatically:
-`agentpipe agents new NAME --from ID` scaffolds the package with the manifest filled in from the
-proposal, you write the prompt, and `agentpipe retry` (or `reply`) the task that waited for it.
+### Agents that act with your approval
+
+Two things the pipeline must never do on its own are changing GitHub and installing new agents.
+A manifest with `requires_confirmation: true` marks an agent that may do such things, but only by
+proposing: it explores read-only, then returns a **confirmation request** listing the exact steps
+(commands with their directories, or files to write) with why and the risk. The task lands in
+"needs you" as "approve: …"; opening it shows every step and every file, with **Approve and run**
+and **Reject**. On approval, code runs the steps verbatim as you, one at a time, logging each on
+the task; a failing step stops the rest. The agent never holds the permission itself. A hard deny
+list still applies to approved commands (no `sudo`, recursive deletes, `curl`, sysadmin commands,
+credential access), and every path must be under your home directory or the project.
+
+- **github**: repositories, pushes, pull requests (open, merge, close), issues, labels, releases.
+  It refuses to force-push or delete unless the task says so, and then names it in the risk.
+- **agent-creator**: writes a complete agent package (manifest, prompt, verifier, tests) from a
+  specification and installs it under `~/.config/agentpipe/agents/<name>/`, running its tests as
+  the last step. This is how the architect grows the roster: when a goal needs a skill no agent
+  has, it delegates the creation with the full spec, you approve the files, and on its next
+  review it delegates the waiting work to the new agent. Lighter **agent proposals** (a note
+  without a task, shown under "Suggested agents" and in `agentpipe agents proposals`) are for gaps
+  the goal does not depend on; `agentpipe agents new NAME --from ID` scaffolds one by hand.
+
+`agentpipe show ID` prints a request (`--full` includes file contents); `approve` and `reject`
+decide it from the terminal.
 
 ### Projects: streams of work
 
@@ -208,7 +228,9 @@ policy would say.
 | `POST /api/tasks` | `{description, project?, agent?, title?, priority?, acceptance?}`: queue a task |
 | `POST /api/task/ID/reply` | `{text, requeue?}`: answer the agent; requeues a stopped task |
 | `POST /api/task/ID/retry`, `POST /api/task/ID/cancel` | `{}` / `{reason?}` |
+| `POST /api/task/ID/approve`, `POST /api/task/ID/reject` | decide a confirmation request; approve runs its steps while the page polls the task |
 | `POST /api/proposal/ID/dismiss` | drop a suggested agent |
+| `POST /api/upgrade` | `{force?}`: pull, install, and schedule a restart of the worker and web units |
 | `/ca.crt` | the server's self-signed certificate |
 
 In the **Needs you** list an `attention` row shows what the agent is asking; clicking a row opens
@@ -218,6 +240,18 @@ what the CLI commands do. Writes are accepted only from the page's own origin wi
 (browsers send `Sec-Fetch-Site`; a form on another site cannot pass), and from non-browser
 clients such as `curl`. There is no login: the page is meant for a LAN, like the rest of the box.
 When the page is offline (stale snapshot) the buttons are disabled.
+
+Open task details survive the 20-second refresh: the lists are rebuilt only when their rows
+change, open detail rows are moved rather than rebuilt, and a half-typed reply stays where it
+is. A detail whose task changed status is refreshed in place.
+
+**Upgrading the box from the page.** The server checks `origin` every ten minutes; when the
+deployed checkout is behind, a banner lists the waiting commits with an **Upgrade now** button.
+It pulls (fast-forward only, refusing if the checkout has local changes), runs `bun install`, and
+schedules a restart of `agentpipe-worker` and `agentpipe-web` three seconds later through a
+transient systemd timer, so the web server can restart itself. A running task blocks the upgrade
+unless you confirm interrupting it (it is requeued). `agentpipe upgrade` does the same from a
+shell, `--check` only reports.
 
 The page polls every 20 seconds and keeps the last snapshot in the browser. When the server stops
 answering it switches to "offline since …" and shows the stale snapshot dimmed. For that to work

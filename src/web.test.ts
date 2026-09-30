@@ -102,6 +102,30 @@ describe("write API", () => {
     expect((await (await handler(new Request("http://mothership:8081/api/proposals"))).json()).proposals).toEqual([]);
     expect((await (await handler(new Request("http://mothership:8081/api/proposals?all=1"))).json()).proposals.length).toBe(1);
   });
+  test("approve marks the request running at once, runs it, and reject cancels", async () => {
+    const mk = () => {
+      const t = store.add({ project: "demo", agent: "github", title: "x", description: "x" });
+      store.setStatus(t.id, "running");
+      store.setStatus(t.id, "attention");
+      store.setConfirmation(t.id, { request: { title: "Echo something", why: "The test wants to see a step run end to end.", risk: "none", steps: [{ kind: "command", command: "echo hi", why: "y" }], links: [], continue_after: false }, status: "pending", requested_at: new Date().toISOString(), log: [] });
+      return t.id;
+    };
+    const a = mk();
+    const s0 = await (await handler(new Request("http://mothership:8081/api/status"))).json();
+    expect(s0.queue[0].needsYou.find((x: any) => x.id === a).ask).toBe("approve: Echo something");
+    expect(s0.checks.some((c: any) => c.name === "Awaiting your approval")).toBe(true);
+    const r = await (await post(`/api/task/${a}/approve`, {})).json();
+    expect(r.ok).toBe(true);
+    expect(["running", "approved"]).toContain(r.task.confirmation.status);
+    await new Promise((res) => setTimeout(res, 500));
+    expect(store.get(a)!.status).toBe("done");
+    expect(store.get(a)!.confirmation!.log.join(" ")).toContain("echo hi -> hi");
+    expect((await post(`/api/task/${a}/approve`, {})).status).toBe(400);
+    const b = mk();
+    const rj = await (await post(`/api/task/${b}/reject`, { reason: "no" })).json();
+    expect(rj.task.status).toBe("cancelled");
+    expect(store.get(b)!.error).toBe("rejected: no");
+  });
   test("task detail includes the run report when there is one", async () => {
     const run = path.join(root, "run");
     mkdirSync(run);

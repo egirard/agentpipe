@@ -2,8 +2,9 @@ import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
 import { READ_ONLY_TOOLS, jsonSchemaOf, runClaude, tryParseJson } from "./claude.ts";
+import { validateConfirmation } from "./actions.ts";
 import { loadConfig, type Config } from "./config.ts";
-import type { GlobalConfig, ProjectConfig } from "./global.ts";
+import { agentpipeRoot, configDir, dataDir, type GlobalConfig, type ProjectConfig } from "./global.ts";
 import { ollamaJson, type OllamaMessage } from "./ollama.ts";
 import { describeStream, renderProjects } from "./projects.ts";
 import { runPipeline } from "./pipeline.ts";
@@ -46,12 +47,26 @@ export interface AgentRunContext {
   startBranch: string;
 }
 
-function schemaWithAgents(manifest: Pick<AgentManifest, "can_delegate" | "can_create_projects">, names: string[]) {
+function schemaWithAgents(manifest: Pick<AgentManifest, "can_delegate" | "can_create_projects" | "requires_confirmation">, names: string[]) {
   const sub = Subtask.extend({ agent: names.length ? z.enum(names as [string, ...string[]]) : z.string() });
   let schema: z.ZodObject<any> = AgentResult.extend({ subtasks: z.array(sub).default([]) });
   if (!manifest.can_create_projects) schema = schema.omit({ projects: true });
   if (!manifest.can_delegate) schema = schema.omit({ agent_proposals: true });
+  if (!manifest.requires_confirmation) schema = schema.omit({ confirmation: true });
   return jsonSchemaOf(schema);
+}
+
+/** Where the pipeline itself lives, for agents that work on it (agent-creator) rather than in a project. */
+export function renderAgentpipe(): string {
+  const root = agentpipeRoot();
+  return [
+    `Root of the agentpipe checkout (code, docs, built-in agents): ${root}`,
+    `Authoring guide for agents: ${path.join(root, "docs", "AGENTS.md")}`,
+    `Built-in agent packages, the examples to follow: ${path.join(root, "src", "agents")}/<name>/`,
+    `Verifier helpers to import: ${path.join(root, "src", "verify.ts")}; test helpers: ${path.join(root, "src", "testkit.ts")}`,
+    `Machine agents directory, where new agents are installed so every project sees them: ${path.join(configDir(), "agents")}/<name>/`,
+    `Data directory (queue database, logs, digests): ${dataDir()}`,
+  ].join("\n");
 }
 
 function projectCommands(cfg: Config): string[] {
@@ -144,11 +159,13 @@ async function buildPrompt(task: Task, ctx: AgentRunContext, manifest: AgentMani
   if (manifest.context.includes("repo-overview")) parts.push("# Repository overview (directories, file counts)\n" + (await repoOverview(ctx.cfg.repo)));
   if (manifest.context.includes("queue")) parts.push("# Current queue for this project\n" + renderQueue(ctx));
   if (manifest.context.includes("projects")) parts.push("# Projects (streams of work) on this machine\n" + renderProjects(ctx.gcfg, ctx.store));
-  if (manifest.context.includes("catalog") && manifest.can_delegate) {
-    parts.push("# Agents you may delegate to (registry)\n" + catalogFor(ctx, manifest.name));
-    parts.push(DELEGATION_RULES);
+  if (manifest.context.includes("agentpipe")) parts.push("# Agentpipe itself\n" + renderAgentpipe());
+  if (manifest.context.includes("catalog")) {
+    parts.push(`# ${manifest.can_delegate ? "Agents you may delegate to" : "Registered agents"} (registry)\n` + catalogFor(ctx, manifest.name));
+    if (manifest.can_delegate) parts.push(DELEGATION_RULES);
   }
   if (manifest.can_delegate) parts.push(PROPOSAL_RULES);
+  if (manifest.requires_confirmation) parts.push(CONFIRMATION_RULES);
   parts.push(RESULT_RULES);
   return parts.join("\n\n");
 }
@@ -160,7 +177,16 @@ const DELEGATION_RULES = `# How delegation works
 - Size coder tasks for a 7B local model guided by a planner: one concern, a handful of small files, tests included. Split anything larger.
 - Reviewers and testers run after the code they examine: list the coder task in "after" and let the worker pass its branch along.
 - Commands outside an agent's shell groups are refused. Work that needs other commands (installs, builds, scripted checks) goes to the shell-runner agent as its own subtask, with the exact command and why.
+- Agents marked "asks the human to approve exact steps" may do what the others may not (GitHub writes, installing a new agent): they propose the steps, the human approves on the status page, code runs them. Delegate such work to them with a complete specification instead of raising it as a question in attention.
 - When every subtask has finished, the architect is woken to review the outcomes under this task; you do not need to schedule that.`;
+
+const CONFIRMATION_RULES = `# Acting with the human's approval
+You may do things other agents may not, but never directly: you return status attention with a "confirmation" that lists the exact steps, and a human approves or rejects it on the status page. On approval, code runs the steps verbatim, in order, as the human, and stops at the first failure. Rules:
+- Explore first (read-only) so the steps are exact: real paths, real names, the right directory for each command. One purpose per step; no "and then" commands.
+- Commands run in the project's main checkout unless a step names cwd. Directories and files must be under the home directory; commands that escalate privileges, delete recursively, reach the network with curl/wget, or administer the system are refused before the human sees them.
+- Write the title as what will happen, why in terms of the task, and risk honestly: what is irreversible, what could go wrong, how to undo. Put links to anything the human should read first.
+- Set continue_after true only when you must see the outputs to finish (to verify a result or do a dependent step); otherwise the task is done when the steps succeed.
+- If the task is ambiguous, return attention with the question and no confirmation; the answer reaches you on your next run. If the task needs nothing you are restricted from, do it and return done.`;
 
 const PROPOSAL_RULES = `# Agents that do not exist yet
 Delegate only to registered agents; a subtask naming any other agent is dropped. When part of the work needs a skill no registered agent has (a tool, a language, an external system, a kind of check), do not improvise: describe the missing agent in "agent_proposals" (name, runtime, what it would do, why this work needs it), plan everything else, and say in the summary what is left undone until that agent exists. A human creates agents; if the whole assignment depends on one, return attention so they can create it and reply.`;
@@ -209,6 +235,20 @@ async function claudeRuntime(task: Task, ctx: AgentRunContext, manifest: AgentMa
     delete res.agent_proposals;
   }
   if (!manifest.can_create_projects) delete res.projects;
+  if (!manifest.requires_confirmation) delete res.confirmation;
+  else if (res.confirmation) {
+    // A request is shown to the human only when it is clean; otherwise the agent hears why and can try again.
+    const problems = validateConfirmation(res.confirmation, ctx.project);
+    if (problems.length) {
+      res.summary += `\n\n## Confirmation request refused\nThe steps were not shown to the human:\n${problems.map((p) => "- " + p).join("\n")}`;
+      res.findings.push(...problems.map((p) => ({ severity: "blocker" as const, description: `confirmation request: ${p}` })));
+      delete res.confirmation;
+      if (res.status !== "failed") res.status = "attention";
+    } else {
+      res.status = "attention";
+      res.subtasks = [];
+    }
+  }
   return res;
 }
 
@@ -218,10 +258,11 @@ async function ollamaRuntime(task: Task, ctx: AgentRunContext, manifest: AgentMa
     { role: "system", content: manifest.prompt + SAFETY_FOOTER },
     { role: "user", content: clip(prompt, ctx.cfg.numCtx * 3) },
   ];
-  const schema = jsonSchemaOf(AgentResult.omit({ projects: true, agent_proposals: true, subtasks: true })) as Record<string, unknown>;
+  const schema = jsonSchemaOf(AgentResult.omit({ projects: true, agent_proposals: true, subtasks: true, confirmation: true })) as Record<string, unknown>;
   const res = await ollamaJson(messages, { url: ctx.cfg.ollamaUrl, model: manifest.model || ctx.cfg.models.reviewer, numCtx: ctx.cfg.numCtx, schema, label: `${manifest.name} #${task.id}` }, (v) => AgentResult.parse(v));
   res.subtasks = [];
   delete res.agent_proposals;
+  delete res.confirmation;
   return res;
 }
 

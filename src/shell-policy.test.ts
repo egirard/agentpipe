@@ -43,3 +43,19 @@ describe("shell policy", () => {
     expect(cmd).toContain("git-read");
   });
 });
+
+describe("approved commands", () => {
+  test("lift the git/gh rules, keep the hard ones, and read --source as a flag", async () => {
+    const { checkApprovedCommand } = await import("./shell-policy.ts");
+    expect(checkApprovedCommand("gh repo create egirard/x --private --source . --remote origin --push").ok).toBe(true);
+    expect(checkApprovedCommand("git push -u origin main").ok).toBe(true);
+    expect(checkApprovedCommand("gh pr merge 12 --squash --delete-branch").ok).toBe(true);
+    expect(checkApprovedCommand("source ~/.bashrc").ok).toBe(false);
+    expect(checkApprovedCommand("ls; source x").ok).toBe(false);
+    expect(checkApprovedCommand("sudo apt install x").ok).toBe(false);
+    expect(checkApprovedCommand("rm -rf build").ok).toBe(false);
+    expect(checkApprovedCommand("curl https://x").ok).toBe(false);
+    expect(checkApprovedCommand("echo $GITHUB_TOKEN").ok).toBe(false);
+    expect(checkApprovedCommand("systemctl --user restart agentpipe-worker").ok).toBe(false);
+  });
+});

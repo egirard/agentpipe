@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { addTask, cancelTask, replyToTask, retryTask, viewProposal } from "./actions.ts";
+import { addTask, approveTask, cancelTask, rejectTask, replyToTask, retryTask, viewProposal } from "./actions.ts";
 import { architectReview, latestDigest } from "./architect.ts";
 import { claudeReachable } from "./claude.ts";
 import { loadConfig, loadEnvFile, type Config } from "./config.ts";
@@ -16,6 +16,7 @@ import { hasGitIdentity, repoStack } from "./repo.ts";
 import { shellCheckMain } from "./shell-policy.ts";
 import { Store, type TaskStatus } from "./store.ts";
 import { sh } from "./util.ts";
+import { checkForUpdate, runUpgrade } from "./upgrade.ts";
 import { runWeb } from "./web.ts";
 import { runWorker } from "./worker.ts";
 
@@ -32,10 +33,12 @@ Queue (the normal way to hand work to the system):
   agentpipe show ID                           # full record, events, replies, children
   agentpipe reply ID "answer" [--no-requeue]  # answer a task that stopped (attention/failed/cancelled); it is requeued and the agent continues with your reply
   agentpipe retry ID | cancel ID [--reason "why"] | prio ID N   # cancelled = impossible or moot; leaves "needs you", stays in history
+  agentpipe approve ID | reject ID [--reason "why"]   # decide a confirmation request (github, agent-creator): approve runs the listed steps as you
   agentpipe worker [--once] [--project P]     # drain the queue (normally a systemd user service)
   agentpipe architect review [--project P] [--dry-run]   # the architect's wake-up (normally a systemd timer)
   agentpipe digest                            # print the latest architect digest
   agentpipe web [--port 8081] [--tls-port 8443]   # status page + JSON API (normally a systemd user service)
+  agentpipe upgrade [--check] [--force]       # pull the deployed checkout, bun install, restart the worker and web units
 
 Registry:
   agentpipe agents                            # list agents the architect can delegate to
@@ -298,8 +301,17 @@ async function main() {
       const id = Number(positional[0]);
       const t = store.get(id);
       if (!t) throw new Error(`no task #${id}`);
-      const { depends_on, files, description, summary, acceptance, ...rest } = t;
+      const { depends_on, files, description, summary, acceptance, confirmation, ...rest } = t;
       for (const [k, v] of Object.entries(rest)) if (v !== null && v !== "" && v !== 0) console.log(`${k.padEnd(12)} ${v}`);
+      if (confirmation) {
+        const c = confirmation.request;
+        console.log(`\n--- confirmation (${confirmation.status}${confirmation.decided_by ? `, ${confirmation.decided_by}` : ""}) ---\n${c.title}\nwhy:  ${c.why}\nrisk: ${c.risk}`);
+        c.steps.forEach((st, i) => console.log(`${i + 1}. ${st.kind === "command" ? `$ ${st.command}${st.cwd ? `   (in ${st.cwd})` : ""}` : `write ${st.path} (${(st.content ?? "").length} chars)`}\n   ${st.why}`));
+        for (const l of c.links) console.log(`link: ${l}`);
+        if (confirmation.status === "pending") console.log(`decide: agentpipe approve ${id}   |   agentpipe reject ${id} --reason "..."   (file contents: agentpipe show ${id} --full)`);
+        if (flags.full) for (const st of c.steps) if (st.kind === "write") console.log(`\n===== ${st.path} =====\n${st.content}`);
+        for (const l of confirmation.log) console.log(`log: ${l}`);
+      }
       if (depends_on.length) console.log(`depends_on   ${depends_on.map((d) => "#" + d).join(", ")}`);
       if (acceptance.length) console.log(`acceptance   ${acceptance.map((a, i) => (i ? "\n             " : "") + "- " + a).join("")}`);
       if (files.length) console.log(`files        ${files.join(", ")}`);
@@ -332,6 +344,40 @@ async function main() {
       if (!Number.isInteger(id)) throw new Error("usage: agentpipe retry ID");
       const t = retryTask(new Store(), id, process.env.USER ?? "cli");
       console.log(`#${id} ${t.status === "queued" ? "requeued" : t.status}`);
+      break;
+    }
+    case "approve": {
+      const id = Number(positional[0]);
+      if (!Number.isInteger(id)) throw new Error("usage: agentpipe approve ID");
+      const store = new Store();
+      const t = store.get(id);
+      if (!t?.confirmation) throw new Error(`#${id} has no confirmation request`);
+      console.log(`${t.confirmation.request.title}\n${t.confirmation.request.steps.length} step(s) run as ${process.env.USER ?? "you"}...`);
+      const r = await approveTask(store, loadGlobalConfig(), id, process.env.USER ?? "cli");
+      for (const l of r.log) console.log(`  ${l}`);
+      console.log(`#${id} -> ${r.task.status}${r.ok ? "" : " (a step failed; see agentpipe show " + id + ")"}`);
+      process.exitCode = r.ok ? 0 : 2;
+      break;
+    }
+    case "reject": {
+      const id = Number(positional[0]);
+      if (!Number.isInteger(id)) throw new Error('usage: agentpipe reject ID [--reason "why"]');
+      const r = rejectTask(new Store(), id, process.env.USER ?? "cli", str(flags.reason) ?? positional.slice(1).join(" "));
+      console.log(`#${id} rejected and cancelled: ${r.task.error}`);
+      break;
+    }
+    case "upgrade": {
+      const store = new Store();
+      if (flags.check) {
+        const u = await checkForUpdate({ maxAgeMs: 0 });
+        if (u.error) throw new Error(`cannot check: ${u.error}`);
+        console.log(u.available ? `update available: ${u.behind} commit(s) behind origin/${u.branch} (${u.local} -> ${u.remote})${u.dirty ? "; checkout has local changes" : ""}\n${u.commits.map((c) => "  " + c).join("\n")}` : `up to date at ${u.local} on ${u.branch}${u.ahead ? ` (${u.ahead} local commit(s) not pushed)` : ""}`);
+        process.exitCode = u.available ? 2 : 0;
+        break;
+      }
+      const r = await runUpgrade(store, { force: Boolean(flags.force), restart: flags["no-restart"] ? "none" : "now" });
+      for (const l of r.lines) console.log(l);
+      process.exitCode = r.ok ? 0 : 1;
       break;
     }
     case "reply": {

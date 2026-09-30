@@ -208,7 +208,10 @@ Every runtime ends in this shape (`AgentResult` in `src/result.ts`):
                   "priority": 40, "after": [0], "files": ["src/x.ts"], "branch": "agentpipe/..." } ],
   "projects": [ ... ],          // only agents with can_create_projects (section 3.9)
   "agent_proposals": [ { "name": "db-migrator", "runtime": "claude", "description": "...", "why": "...",
-                         "inputs": "...", "outputs": "...", "commits": true, "shell": ["checks"] } ]   // only can_delegate agents
+                         "inputs": "...", "outputs": "...", "commits": true, "shell": ["checks"] } ],  // only can_delegate agents
+  "confirmation": { "title": "...", "why": "...", "risk": "...", "links": [], "continue_after": false,   // only requires_confirmation agents
+                    "steps": [ { "kind": "command", "command": "gh repo create ...", "cwd": "~/src/x", "why": "..." },
+                               { "kind": "write", "path": "~/.config/agentpipe/agents/x/agent.json", "content": "...", "why": "..." } ] }
 }
 ```
 
@@ -220,6 +223,8 @@ What each status means, and what the worker does with it:
 | `attention` | The agent got somewhere but a human must decide or answer before work continues: an ambiguous requirement, a design choice, an environment problem, a change it is not allowed to make (screenshot baselines), repeated failure, an agent that has to be created first. | Record; keep any branch but never push; dependants become `blocked`; the task appears under "needs you" and in the next architect review. The human's `reply` requeues it, and the next run sees the previous report and the reply (section 3.6). |
 | `failed` | The agent tried and could not: an error, a broken environment. A retry or a better specification might succeed. | Record with the summary as the error; dependants become `blocked`; reviewed by the architect, who may retry or re-specify. |
 | `cancelled` | The task cannot be done as specified and no retry would help: impossible in this repository, moot, contradicts the codebase, or needs a capability no agent has (then propose the agent). The summary says why and what would make it possible. | Record with the reason as the error; dependants become `blocked`; the human is notified; the architect confirms, re-plans or escalates on its next review. Leaves "needs you"; does not count against the agent's track record. |
+
+`confirmation` is the one way an agent gets something done that the policy forbids (section 3.10).
 
 `agent_proposals` is how a delegating agent says "this needs an agent that does not exist".
 Proposals are recorded (deduplicated by name while open), listed in the task's summary and
@@ -328,9 +333,12 @@ The user message is assembled from the task and `manifest.context`, in this orde
 6. `projects`: every project on the machine with its status, branch, progress and goal, for
    agents that create streams.
 7. `catalog`: the registry as a catalog (name, description, when to use, inputs, outputs, and each
-   agent's recent track record with a warning when it has been escalating or failing often)
-   followed by the delegation rules. Only for `can_delegate` agents; the agent itself is left out
-   so it cannot delegate to itself.
+   agent's recent track record with a warning when it has been escalating or failing often). For
+   `can_delegate` agents it is followed by the delegation rules and the agent itself is left out;
+   other agents (agent-creator) see it as a plain roster.
+7b. `agentpipe`: where the pipeline itself lives: root, authoring guide, built-in packages,
+   verifier and test helpers, machine agents directory, data directory.
+7c. **Confirmation rules** (`requires_confirmation` agents): how to propose steps for approval.
 8. **Proposal rules** (`can_delegate` agents): delegate only to registered agents; describe a
    missing one in `agent_proposals` instead of improvising.
 9. **Result rules** (always): what the JSON must contain and what the statuses mean.
@@ -418,6 +426,38 @@ Its prompt makes it vet each command against the same rules before running it, a
 checks again. Shell-runtime agents (a fixed `command`) and shell verifiers pass through
 `checkCommand` too. Secrets (`CLAUDE_CODE_OAUTH_TOKEN` and friends) are stripped from the
 environment of every subprocess an agent influences.
+
+### 3.10 Acting with the human's approval (`requires_confirmation`)
+
+Some work must not happen without a person deciding: anything on GitHub beyond reading, and
+installing a new agent on the machine. Rather than giving an agent those permissions, a manifest
+with `requires_confirmation: true` (claude runtime only) lets it *propose*:
+
+1. The agent explores read-only and returns `status: attention` with a `confirmation`: a title,
+   why, an honest risk statement, links, and the steps: `command` steps (exact command line,
+   optional `cwd`, one purpose each) or `write` steps (path and complete content).
+2. The runtime validates the request before anyone sees it: every command must clear the hard
+   deny list for approved commands (`APPROVED_DENY` in `src/shell-policy.ts`: the git/gh
+   state-changing rules are lifted, everything else stays), every directory and file must be
+   under the home directory or the project checkout and away from credential files. A request
+   with problems is dropped, the problems become blocker findings, and the agent hears why on its
+   next run.
+3. The worker stores the request on the task (`confirmation`, status `pending`) and notifies.
+   The status page shows it under "needs you" as "approve: title"; opening the task shows every
+   step, every file, the risk, the links, and **Approve and run** / **Reject**. `agentpipe show`,
+   `approve` and `reject` do the same in a terminal.
+4. On approval the steps run in order, as the human, from the web server or the CLI (not the
+   worker), each logged on the task; a failing step stops the rest and leaves the task in
+   `attention` with the failure. Success ends the task `done`, or, when `continue_after` is set,
+   requeues it with the outputs as a reply so the agent can check or finish.
+5. Reject cancels the task with the reason. A reply or retry supersedes a pending request; the
+   agent asks afresh if it still needs to.
+
+The built-in `github` and `agent-creator` agents are the two examples; their verifiers add the
+role-specific rules (git/gh commands only and named destruction for github; one package under the
+machine agents directory with a parsing manifest and a final test run for agent-creator). The
+`agentpipe` context kind gives an agent the paths of the pipeline itself: root, authoring guide,
+built-in packages, verifier and test helpers, and the machine agents directory.
 
 ### 3.9 Lanes, budgets, projects
 

@@ -1,7 +1,12 @@
-import { currentProject, isRunnable, projectStatus, type GlobalConfig } from "./global.ts";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import path from "node:path";
+import { currentProject, expandHome, isRunnable, projectStatus, type GlobalConfig, type ProjectConfig } from "./global.ts";
 import { loadRegistry, requireAgent } from "./registry.ts";
-import type { AgentProposal } from "./result.ts";
-import type { ProposalRow, Store, Task } from "./store.ts";
+import type { AgentProposal, ConfirmationRequest } from "./result.ts";
+import { checkApprovedCommand } from "./shell-policy.ts";
+import type { Confirmation, ProposalRow, Store, Task } from "./store.ts";
+import { clip, log, sh } from "./util.ts";
 
 /**
  * The few things a human does to the queue, shared by the CLI (`agentpipe add|reply|retry|cancel`)
@@ -115,6 +120,7 @@ export function cancelTask(store: Store, id: number, by: string, reason?: string
   const why = (reason ?? "").trim();
   store.setStatus(id, "cancelled", `by ${by}${why ? `: ${why}` : ""}`);
   store.update(id, { triaged: 1, ...(why ? { error: why } : {}) });
+  if (t.confirmation?.status === "pending") store.setConfirmation(id, { ...t.confirmation, status: "rejected", decided_by: by, decided_at: new Date().toISOString(), log: [...t.confirmation.log, `rejected by ${by}${why ? `: ${why}` : ""}`] });
   store.settleParent(id);
   return { task: store.get(id)!, note: t.status === "running" ? "the worker is running this task; it finishes the current agent call, then the result is recorded but no subtasks are created. Stop the worker to abort it." : null };
 }
@@ -133,4 +139,146 @@ export function recordProposals(store: Store, proposals: AgentProposal[] | undef
 /** A proposal row with its spec parsed, for the API and the CLI. */
 export function viewProposal(r: ProposalRow): ProposalRow & { proposal: AgentProposal } {
   return { ...r, proposal: JSON.parse(r.spec) as AgentProposal };
+}
+
+/* ---------- confirmations: agents that may act only with the human's approval ---------- */
+
+const CREDENTIAL_PATHS = /(^|\/)\.(ssh|gnupg|aws|netrc|claude)(\/|$)|\/\.config\/(gh|agentpipe\/env)(\/|$)|(^|\/)\.env(\.|$)/;
+
+function under(dir: string, p: string): boolean {
+  const rel = path.relative(dir, p);
+  return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel);
+}
+
+/** Steps may touch the home directory and the project's checkout (which may live elsewhere), nothing else. */
+function inBounds(p: string, project: ProjectConfig): boolean {
+  return under(homedir(), p) || under(project.path, p);
+}
+
+/** Resolve a step's path (absolute or ~/), relative ones against the project checkout. */
+function stepPath(p: string, project: ProjectConfig): string {
+  const e = expandHome(p);
+  return path.isAbsolute(e) ? path.normalize(e) : path.resolve(project.path, e);
+}
+
+/**
+ * Problems with a confirmation request, checked before it is shown to the human and again before
+ * it runs. Commands must clear the hard deny list; every directory and file must be under the
+ * home directory and away from credentials. A request with problems is never stored as pending.
+ */
+export function validateConfirmation(req: ConfirmationRequest, project: ProjectConfig): string[] {
+  const out: string[] = [];
+  req.steps.forEach((s, i) => {
+    const n = `step ${i + 1}`;
+    if (s.kind === "command") {
+      if (!s.command?.trim()) return void out.push(`${n}: command step without a command`);
+      const v = checkApprovedCommand(s.command);
+      if (!v.ok) out.push(`${n}: "${clip(s.command, 60)}" refused: ${v.reason}`);
+      if (s.cwd) {
+        const d = stepPath(s.cwd, project);
+        if (!inBounds(d, project)) out.push(`${n}: cwd ${d} is outside the home directory and the project`);
+        if (CREDENTIAL_PATHS.test(d)) out.push(`${n}: cwd ${d} is a credential directory`);
+      }
+    } else {
+      if (!s.path?.trim()) return void out.push(`${n}: write step without a path`);
+      if (typeof s.content !== "string") out.push(`${n}: write step without content`);
+      const f = stepPath(s.path, project);
+      if (!inBounds(f, project)) out.push(`${n}: ${f} is outside the home directory and the project`);
+      if (CREDENTIAL_PATHS.test(f)) out.push(`${n}: ${f} is a credential or configuration secret`);
+      if (/\.(ssh|pem|key)$/.test(f)) out.push(`${n}: ${f} looks like a key`);
+    }
+  });
+  return out;
+}
+
+export interface ApproveOutcome {
+  task: Task;
+  ok: boolean;
+  log: string[];
+}
+
+/**
+ * Run the steps of a pending confirmation, in order, as the human. The confirmation is marked
+ * `running` synchronously (so a caller may fire and forget), then each step's result is appended
+ * to its log and the task's events. Success ends the task (`done`), or requeues it with a reply
+ * carrying the outputs when the agent asked to continue. A failing step stops the rest and leaves
+ * the task in `attention` with the failure.
+ */
+export async function approveTask(store: Store, gcfg: GlobalConfig, id: number, by: string): Promise<ApproveOutcome> {
+  const t = store.get(id);
+  if (!t) throw new Error(`no task #${id}`);
+  const c = t.confirmation;
+  if (!c) throw new Error(`#${id} has no confirmation request`);
+  if (c.status !== "pending") throw new Error(`#${id}'s request is ${c.status}, not pending`);
+  const project = gcfg.projects[t.project];
+  if (!project) throw new Error(`project "${t.project}" is not configured`);
+  const problems = validateConfirmation(c.request, project);
+  if (problems.length) throw new Error(`request refused: ${problems.join("; ")}`);
+
+  let cur: Confirmation = { ...c, status: "running", decided_by: by, decided_at: new Date().toISOString(), log: [...c.log, `approved by ${by}`] };
+  store.setConfirmation(id, cur);
+  store.event(id, "confirmation", `approved by ${by}: ${c.request.title}`);
+  const save = (line: string) => {
+    cur = { ...cur, log: [...cur.log, line] };
+    store.setConfirmation(id, cur);
+    store.event(id, "confirmation", line);
+  };
+
+  let ok = true;
+  const outputs: string[] = [];
+  for (const [i, s] of c.request.steps.entries()) {
+    const n = i + 1;
+    try {
+      if (s.kind === "write") {
+        const f = stepPath(s.path!, project);
+        const existed = existsSync(f);
+        mkdirSync(path.dirname(f), { recursive: true });
+        writeFileSync(f, s.content ?? "");
+        save(`step ${n} ok: ${existed ? "overwrote" : "wrote"} ${f} (${(s.content ?? "").length} chars)`);
+        outputs.push(`step ${n}: ${existed ? "overwrote" : "wrote"} ${f}`);
+      } else {
+        const cwd = s.cwd ? stepPath(s.cwd, project) : project.path;
+        if (!existsSync(cwd)) throw new Error(`directory ${cwd} does not exist`);
+        log(`confirmation #${id} step ${n}: ${s.command} (in ${cwd})`);
+        const r = await sh(s.command!, cwd, 900);
+        const out = r.output.trim();
+        outputs.push(`step ${n}: \`${s.command}\` in ${cwd} ${r.timedOut ? "timed out" : `exited ${r.code}`}${out ? `\n\`\`\`\n${clip(out, 4000)}\n\`\`\`` : ""}`);
+        if (!r.ok) throw new Error(`\`${s.command}\` ${r.timedOut ? "timed out" : `exited ${r.code}`}: ${clip(out, 600)}`);
+        save(`step ${n} ok: ${s.command}${out ? ` -> ${clip(out.split("\n").slice(-1)[0], 200)}` : ""}`);
+      }
+    } catch (e) {
+      ok = false;
+      save(`step ${n} FAILED: ${(e as Error).message}`);
+      break;
+    }
+  }
+
+  const report = `## Approved by ${by}\n${outputs.join("\n\n")}`;
+  if (!ok) {
+    cur = { ...cur, status: "failed" };
+    store.setConfirmation(id, cur);
+    store.update(id, { error: cur.log[cur.log.length - 1], summary: `${t.summary ?? ""}\n\n${report}`.trim(), triaged: 1 });
+    store.event(id, "status", "attention (approved steps failed)");
+    return { task: store.get(id)!, ok, log: cur.log };
+  }
+  cur = { ...cur, status: "approved" };
+  store.setConfirmation(id, cur);
+  store.update(id, { summary: `${t.summary ?? ""}\n\n${report}`.trim() });
+  if (c.request.continue_after) {
+    store.reply(id, by, `Approved and executed. ${outputs.join("\n\n")}`);
+    store.requeue(id, `approved by ${by}; the agent continues with the outputs`);
+  } else {
+    store.setStatus(id, "done", `approved by ${by}; ${c.request.steps.length} step(s) executed`);
+    store.update(id, { triaged: 1, error: null });
+    store.settleParent(id);
+  }
+  return { task: store.get(id)!, ok, log: cur.log };
+}
+
+/** Decline a pending request: the task is cancelled with the reason, and the agent is not run again. */
+export function rejectTask(store: Store, id: number, by: string, reason?: string | null): CancelOutcome {
+  const t = store.get(id);
+  if (!t) throw new Error(`no task #${id}`);
+  if (!t.confirmation || t.confirmation.status !== "pending") throw new Error(`#${id} has no pending confirmation request`);
+  return cancelTask(store, id, by, `rejected: ${(reason ?? "").trim() || t.confirmation.request.title}`);
 }

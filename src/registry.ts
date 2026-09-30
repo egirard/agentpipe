@@ -29,7 +29,7 @@ import { sha1 } from "./util.ts";
 export const Runtime = z.enum(["pipeline", "claude", "ollama", "shell"]);
 export type Runtime = z.infer<typeof Runtime>;
 
-export const ContextKind = z.enum(["repo-overview", "files", "branch-diff", "queue", "catalog", "projects"]);
+export const ContextKind = z.enum(["repo-overview", "files", "branch-diff", "queue", "catalog", "projects", "agentpipe"]);
 export type ContextKind = z.infer<typeof ContextKind>;
 
 export const AgentManifest = z.object({
@@ -44,6 +44,10 @@ export const AgentManifest = z.object({
   can_delegate: z.boolean().default(false).describe("May create subtasks for other agents."),
   commits: z.boolean().default(false).describe("May change files. The worker gives it a branch, verifies, runs lint + unit tests, commits, and opens a PR."),
   can_create_projects: z.boolean().default(false).describe("May propose new projects (streams of work) in its result. Code creates them; GitHub steps wait for the human."),
+  requires_confirmation: z
+    .boolean()
+    .default(false)
+    .describe("The agent may do things other agents may not (GitHub writes, installing agents, commands off the policy) but only by proposing exact steps in its result's `confirmation`; nothing runs until a human approves, then code runs the steps verbatim. claude runtime only."),
   model: z.string().default("").describe("Claude Code model alias (claude runtime) or Ollama model (ollama runtime). Empty = project default."),
   tools: z.array(z.string()).default([]).describe("Extra non-shell Claude Code tools. Bash(...) entries are refused here: shell access is granted through `shell` groups only."),
   shell: z.array(z.string()).default([]).describe("Shell capability groups from src/shell-policy.ts: git-read, gh-read, gh-comment, checks, package-read, ops (shell-runner only). Enforced by allowedTools and a PreToolUse hook."),
@@ -51,7 +55,7 @@ export const AgentManifest = z.object({
   lane: z.string().default("").describe("Worker lane; default gpu for pipeline/ollama, cloud for claude/shell."),
   max_turns: z.number().int().positive().default(40),
   timeout_sec: z.number().int().positive().default(2700),
-  context: z.array(ContextKind).default(["repo-overview", "files", "branch-diff"]).describe("What the worker puts in the prompt besides the task."),
+  context: z.array(ContextKind).default(["repo-overview", "files", "branch-diff"]).describe("What the worker puts in the prompt besides the task. agentpipe: where the pipeline itself, its authoring guide and the machine agents directory live."),
   task_prefix: z.string().default("").describe("pipeline runtime: text prepended to the task before planning."),
   command: z.string().default("").describe("shell runtime: the command. Task fields arrive as AGENTPIPE_TASK_* env vars."),
   prompt: z.string().default("").describe("System prompt. Usually left empty and kept in prompt.md."),
@@ -136,6 +140,10 @@ function loadOne(manifestPath: string, promptPath: string, dir: string | null, r
     m.can_create_projects = false;
   }
   if (m.can_create_projects && !m.context.includes("projects")) m.context = [...m.context, "projects"];
+  if (m.requires_confirmation && m.runtime !== "claude") {
+    reg.problems.push(`${manifestPath}: only claude agents can request confirmation; requires_confirmation ignored`);
+    m.requires_confirmation = false;
+  }
   return m;
 }
 
@@ -197,7 +205,7 @@ export function renderCatalog(reg: Registry, names = [...reg.agents.keys()], hea
   for (const n of names) {
     const a = reg.agents.get(n);
     if (!a) continue;
-    lines.push(`### ${a.name}  (runtime: ${a.runtime}${a.commits ? ", produces a branch/PR" : ""}${a.can_delegate ? ", can delegate" : ""})`);
+    lines.push(`### ${a.name}  (runtime: ${a.runtime}${a.commits ? ", produces a branch/PR" : ""}${a.can_delegate ? ", can delegate" : ""}${a.requires_confirmation ? ", asks the human to approve exact steps before acting" : ""})`);
     lines.push(a.description);
     const h = health?.(n);
     if (h && h.runs) lines.push(`Track record (last ${h.runs}): ${h.done} done, ${h.attention} attention, ${h.failed} failed${h.rate >= warnRate ? ". WARNING: this agent has been failing or escalating often; prefer another agent or give it smaller, more precise tasks" : ""}.`);

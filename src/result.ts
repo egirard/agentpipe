@@ -68,6 +68,32 @@ export const AgentProposal = z.object({
 });
 export type AgentProposal = z.infer<typeof AgentProposal>;
 
+/**
+ * What an agent with `requires_confirmation` wants to do. Nothing in it runs until a human
+ * approves it (status page or `agentpipe approve ID`); then code executes the steps exactly as
+ * listed, in order, and records every output on the task. The agent never holds the permission
+ * itself: it only ever proposes.
+ */
+export const ConfirmStep = z.object({
+  kind: z.enum(["command", "write"]).describe("command: run a shell command. write: create or overwrite a file with the given content."),
+  command: z.string().optional().describe("command steps: the exact command line, one purpose per step."),
+  cwd: z.string().optional().describe("command steps: directory to run in, absolute or ~/ (default: the project's main checkout). Must be under the home directory."),
+  path: z.string().optional().describe("write steps: absolute or ~/ path of the file. Must be under the home directory and not a credential file."),
+  content: z.string().optional().describe("write steps: the complete file content."),
+  why: z.string().min(1).describe("One line: what this step achieves."),
+});
+export type ConfirmStep = z.infer<typeof ConfirmStep>;
+
+export const ConfirmationRequest = z.object({
+  title: z.string().min(5).describe("One line the human sees first: what you want to do, e.g. 'Create github.com/egirard/tools and push main'."),
+  why: z.string().min(20).describe("Why these steps, in a short paragraph, referring to the task."),
+  risk: z.string().min(1).describe("What could go wrong, what is irreversible, and how to undo it. 'Nothing irreversible' when true."),
+  steps: z.array(ConfirmStep).min(1).describe("Executed in order after approval; a failing step stops the rest."),
+  links: z.array(z.string()).default([]).describe("URLs or paths with more detail (a PR, a spec, documentation you followed)."),
+  continue_after: z.boolean().default(false).describe("true: after the steps ran, run this agent again with their output so it can check the result or finish the work. false: the task is done once the steps succeed."),
+});
+export type ConfirmationRequest = z.infer<typeof ConfirmationRequest>;
+
 export const AgentResult = z.object({
   status: z
     .enum(["done", "attention", "failed", "cancelled"])
@@ -79,5 +105,6 @@ export const AgentResult = z.object({
   subtasks: z.array(Subtask).default([]),
   projects: z.array(ProjectSpec).optional().describe("Only for agents that may create projects: new streams to create."),
   agent_proposals: z.array(AgentProposal).optional().describe("Only for delegating agents: agents that do not exist yet but would make currently impossible work possible. A human creates them; never name them in subtasks."),
+  confirmation: ConfirmationRequest.optional().describe("Only for agents that require confirmation: the exact steps you want run, for the human to approve. Use with status attention."),
 });
 export type AgentResult = z.infer<typeof AgentResult>;

@@ -1,0 +1,23 @@
+{
+  "name": "agent-creator",
+  "description": "Writes a complete new agent package (manifest, prompt, verifier, tests) from a specification, following the authoring guide and the built-in agents, and installs it in the machine agents directory once the human approves the exact files. The way the pipeline grows a skill it lacks.",
+  "runtime": "claude",
+  "when_to_use": "When the pipeline needs a skill no registered agent has: a specialised reviewer, a tool runner, a domain-specific coder, a check nobody performs. The architect delegates here with the full specification, the human approves the package, and the new agent is available to every project on the machine from then on. Not for changing an existing agent (that is a coder task in the agentpipe project).",
+  "inputs": "The agent's kebab-case name; what it must do and must not do; the runtime (claude for judgement and tools, ollama for one local model call over text, shell for one fixed command, pipeline for a coder loop with a task prefix); what a task for it must contain; what it produces; shell groups it needs, if any; whether it changes files and where; links to documentation, examples or specifications it should follow.",
+  "outputs": "A confirmation request whose steps write agent.json, prompt.md, verify.ts and tests/<name>.test.ts under the machine agents directory and then run the package's tests; the summary explains the design.",
+  "requires_confirmation": true,
+  "can_delegate": false,
+  "commits": false,
+  "context": [
+    "agentpipe",
+    "catalog"
+  ],
+  "max_turns": 50,
+  "tags": [
+    "meta",
+    "confirmation"
+  ],
+  "shell": [
+    "git-read"
+  ]
+}

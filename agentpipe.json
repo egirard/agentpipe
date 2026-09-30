@@ -1,0 +1,9 @@
+{
+  "commands": {
+    "lint": "bun run typecheck",
+    "unit": "bun test src",
+    "e2e": "true"
+  },
+  "runE2e": false,
+  "push": true
+}

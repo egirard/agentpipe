@@ -361,6 +361,11 @@ function finish(store: Store, gcfg: GlobalConfig, task: Task, outcome: RunOutcom
     // Agents the agent wished it had: recorded for the human, never created here.
     const proposed = recordProposals(store, result.agent_proposals, { task, project: task.project, by: `agent:${task.agent}#${task.id}` });
     if (proposed.length) result.summary += `\n\n## Agents proposed\n${proposed.join("\n")}`;
+    // A confirmation request: validated by the runtime already; recorded here so the page and the CLI can show and decide it.
+    if (result.confirmation) {
+      store.setConfirmation(task.id, { request: result.confirmation, status: "pending", requested_at: new Date().toISOString(), log: [] });
+      store.event(task.id, "confirmation", `requested: ${result.confirmation.title} (${result.confirmation.steps.length} step(s)); approve or reject on the status page or with agentpipe approve ${task.id}`);
+    }
     status = created.length ? "waiting" : result.status;
     store.update(task.id, {
       summary: clip(result.summary, 30_000),
@@ -379,10 +384,11 @@ function finish(store: Store, gcfg: GlobalConfig, task: Task, outcome: RunOutcom
   log(`worker: #${task.id} -> ${t.status}${t.pr_url ? ` (${t.pr_url})` : ""}${t.cost_usd ? ` $${t.cost_usd.toFixed(2)}` : ""}`);
 
   if (t.status === "attention" || t.status === "failed" || t.status === "cancelled") {
+    const pending = t.confirmation?.status === "pending" ? t.confirmation.request : null;
     void notify(gcfg, {
       kind: t.status,
-      title: `agentpipe: #${t.id} ${t.status} [${t.agent}] ${t.title}`,
-      body: `${t.project}${t.parent_id ? ` (child of #${t.parent_id})` : ""}\n${t.error ?? clip(t.summary ?? "", 600)}\n\nagentpipe show ${t.id}${t.run_dir ? `\n${t.run_dir}` : ""}`,
+      title: pending ? `agentpipe: #${t.id} needs your approval: ${pending.title}` : `agentpipe: #${t.id} ${t.status} [${t.agent}] ${t.title}`,
+      body: `${t.project}${t.parent_id ? ` (child of #${t.parent_id})` : ""}\n${pending ? `${pending.why}\nRisk: ${pending.risk}\n${pending.steps.length} step(s): agentpipe show ${t.id}, then agentpipe approve ${t.id} or reject ${t.id}` : `${t.error ?? clip(t.summary ?? "", 600)}\n\nagentpipe show ${t.id}`}${t.run_dir ? `\n${t.run_dir}` : ""}`,
       url: t.pr_url ?? undefined,
     });
   }
