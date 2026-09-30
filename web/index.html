@@ -104,6 +104,32 @@ pre { white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--mono); 
 .agent dt { color: var(--text-2); font-size: 12px; margin-top: 4px; }
 .agent dd { margin: 0; }
 .stale { opacity: 0.62; }
+.stale button, .stale textarea, .stale input, .stale select { pointer-events: none; }
+h2 .act { float: right; text-transform: none; letter-spacing: 0; font-size: 13px; font-weight: 500; padding: 3px 10px; }
+.panel { display: none; border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; background: var(--surface-2); margin: 0 0 12px; }
+.panel.show { display: block; }
+.panel h3 { margin: 0 0 8px; font-size: 14px; font-weight: 600; }
+.form { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 8px 10px; }
+.form label { display: grid; gap: 3px; font-size: 12px; color: var(--text-2); }
+.form label.wide { grid-column: 1 / -1; }
+.form textarea { min-height: 84px; resize: vertical; }
+textarea { font: inherit; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--line); background: var(--surface); color: var(--text); width: 100%; }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+button.danger { color: var(--critical-text); border-color: var(--critical); }
+button:disabled { opacity: 0.5; cursor: default; }
+.note { font-size: 13px; color: var(--text-2); }
+.note.err { color: var(--critical-text); }
+.ask { font-size: 13px; color: var(--warning-text); margin-top: 2px; }
+tr.cancelled .ask, tr.failed .ask { color: var(--text-2); }
+.replies { margin: 8px 0 0; padding: 0; list-style: none; }
+.replies li { border-left: 3px solid var(--accent); padding: 4px 10px; margin: 4px 0; background: var(--surface); border-radius: 0 6px 6px 0; font-size: 13px; }
+.replies li .who { color: var(--muted); font-size: 12px; }
+.reply-form { margin-top: 10px; }
+.proposal { border: 1px dashed var(--accent); }
+.proposal .why { margin: 6px 0; }
+.proposal code { font-family: var(--mono); font-size: 12px; background: var(--surface); padding: 1px 5px; border-radius: 4px; }
+.badge.cancelled { color: var(--muted); border-style: dashed; }
 details summary { cursor: pointer; color: var(--text-2); }
 .empty { color: var(--muted); font-style: italic; }
 .small { font-size: 13px; color: var(--text-2); }
@@ -127,7 +153,18 @@ details summary { cursor: pointer; color: var(--text-2); }
   <div id="banner"><strong>mothership is not answering.</strong> <span id="banner-text"></span></div>
   <p class="small" id="secure-hint" hidden>To keep this page available while the box is down, open the <a id="https-link" href="#">HTTPS version</a> once and trust its certificate (<a href="/ca.crt">download</a>: Windows → Install Certificate → Current User → Trusted Root Certification Authorities).</p>
 
-  <h2>Queue</h2>
+  <h2>Queue <button class="act primary" id="add-toggle" type="button">+ Add task</button></h2>
+  <form class="panel" id="add-panel" autocomplete="off">
+    <h3>Hand work to the architect</h3>
+    <div class="form">
+      <label class="wide">What to do<textarea id="add-desc" required placeholder="The goal in your words. The architect explores the repository, cuts it into tasks for the agents, and reports back."></textarea></label>
+      <label>Project<select id="add-project"></select></label>
+      <label>Agent<select id="add-agent"></select></label>
+      <label>Priority (1 urgent … 99 whenever)<input type="number" id="add-prio" min="1" max="99" placeholder="50"></label>
+      <label class="wide">Acceptance criteria, one per line (optional)<textarea id="add-accept" style="min-height:48px" placeholder="src/x.test.ts passes&#10;the button is disabled outside the hero phase"></textarea></label>
+    </div>
+    <div class="actions"><button class="primary" type="submit" id="add-submit">Queue it</button><button type="button" id="add-cancel">Close</button><span class="note" id="add-note"></span></div>
+  </form>
   <div class="tiles" id="tiles"></div>
   <div id="projects" class="small" style="margin-top:8px"></div>
 
@@ -155,6 +192,10 @@ details summary { cursor: pointer; color: var(--text-2); }
 
   <h2>Architect</h2>
   <div id="architect"></div>
+
+  <h2>Suggested agents</h2>
+  <p class="small">Agents the architect wished it had: work it could not delegate because no registered agent has the skill. Nothing is created automatically; scaffold one with the command shown, fill in its prompt, and retry the task.</p>
+  <div class="agents" id="proposals"></div>
 
   <h2>Agents</h2>
   <p class="small" id="agents-intro"></p>
@@ -199,7 +240,7 @@ details summary { cursor: pointer; color: var(--text-2); }
 
   function tile(label, value, sub, cls = "") { return `<div class="tile ${cls}"><div class="label">${esc(label)}</div><div class="value">${esc(value)}</div><div class="sub">${esc(sub || "")}</div></div>`; }
   function meter(label, pct, right, cls) { return `<div class="meter ${cls || ""}"><div class="row"><span>${esc(label)}</span><b>${esc(right)}</b></div><div class="track"><div class="fill" style="width:${Math.max(0, Math.min(100, pct))}%"></div></div></div>`; }
-  function taskLine(t) { return `<tr class="row" data-id="${t.id}"><td class="id">#${t.id}</td><td>${badge(t.status)}</td><td>${esc(t.agent)}</td><td>${esc(t.title)}${t.pr_url ? ` · <a href="${esc(t.pr_url)}" target="_blank" rel="noopener">PR</a>` : t.branch ? ` <span class="small">(${esc(t.branch)})</span>` : ""}${t.error ? `<div class="small" style="color:var(--critical-text)">${esc(t.error)}</div>` : ""}</td><td class="num">${esc(dur(t.durationSec))}</td><td class="num" title="${esc(when(t.finished_at || t.started_at || t.created_at))}">${esc(age(t.finished_at || t.started_at || t.created_at))}</td></tr>`; }
+  function taskLine(t) { return `<tr class="row ${esc(t.status)}" data-id="${t.id}"><td class="id">#${t.id}</td><td>${badge(t.status)}</td><td>${esc(t.agent)}</td><td>${esc(t.title)}${t.pr_url ? ` · <a href="${esc(t.pr_url)}" target="_blank" rel="noopener">PR</a>` : t.branch ? ` <span class="small">(${esc(t.branch)})</span>` : ""}${t.ask && t.status === "attention" ? `<div class="ask">asks: ${esc(t.ask)}</div>` : t.error ? `<div class="small" style="color:var(--critical-text)">${esc(t.error)}</div>` : t.ask ? `<div class="ask">${esc(t.ask)}</div>` : ""}</td><td class="num">${esc(dur(t.durationSec))}</td><td class="num" title="${esc(when(t.finished_at || t.started_at || t.created_at))}">${esc(age(t.finished_at || t.started_at || t.created_at))}</td></tr>`; }
   const thead = `<thead><tr><th>id</th><th>status</th><th>agent</th><th>task</th><th class="num">took</th><th class="num">when</th></tr></thead>`;
   function table(rows, empty) { return rows.length ? `<table>${thead}<tbody>${rows.map(taskLine).join("")}</tbody></table>` : `<p class="empty">${esc(empty)}</p>`; }
 
@@ -215,10 +256,12 @@ details summary { cursor: pointer; color: var(--text-2); }
       tile("Running", c.running, s.queue.flatMap((q) => q.running).map((t) => "#" + t.id).join(", ")),
       tile("Waiting on children", c.waiting + c.review, c.review ? `${c.review} ready for the architect` : ""),
       tile("Needs you", needs, needs ? `${c.attention} attention, ${c.failed} failed, ${c.blocked} blocked` : "nothing", needs ? "needs" : ""),
-      tile("Done", c.done, "all time"),
+      tile("Done", c.done, c.cancelled ? `all time · ${c.cancelled} cancelled` : "all time"),
       tile("Claude today", s.budgets ? "$" + s.budgets.todayUsd.toFixed(2) : "?", s.budgets ? (s.budgets.dailyCapUsd ? `of $${s.budgets.dailyCapUsd} · $${s.budgets.weekUsd.toFixed(2)} this week` : `$${s.budgets.weekUsd.toFixed(2)} this week`) : ""),
     ].join("");
-    $("#projects").innerHTML = s.queue.map((q) => `<b>${esc(q.project)}</b>: ${Object.entries(q.counts).filter(([, n]) => n).map(([k, n]) => `${n} ${k}`).join(", ") || "empty"} <span class="meta">(${esc(q.path)}${q.push ? ", PRs on" : ", PRs off"})</span>`).join("<br>")
+    fillSelect($("#add-project"), s.queue.map((q) => q.project), s.queue.find((q) => q.current)?.project);
+    fillSelect($("#add-agent"), (s.agents || []).map((a) => a.name).sort((a, b) => (a === "architect" ? -1 : b === "architect" ? 1 : a.localeCompare(b))), "architect");
+    $("#projects").innerHTML = s.queue.map((q) => `<b>${esc(q.project)}</b>${q.current ? " (current)" : ""}${q.status && q.status !== "active" ? ` <span class="meta">[${esc(q.status)}]</span>` : ""}: ${Object.entries(q.counts).filter(([, n]) => n).map(([k, n]) => `${n} ${k}`).join(", ") || "empty"} <span class="meta">(${esc(q.path)}${q.branch ? ", branch " + esc(q.branch) : ""}${q.push ? ", PRs on" : ", PRs off"})</span>${q.goal ? `<br><span class="meta">${esc(q.goal)}</span>` : ""}`).join("<br>")
       + (s.lanes ? `<br>lanes: ${s.lanes.map((l) => `${esc(l.lane)} ${l.running.length}/${l.slots}${l.running.length ? " (#" + l.running.join(", #") + ")" : ""}`).join(" · ")}` : "");
     $("#checks").innerHTML = s.checks.map((k) => `<div class="check ${k.level}"><div class="ico" aria-hidden="true">${k.ok ? "✓" : k.level === "warning" ? "!" : "✕"}</div><div><div class="name">${esc(k.name)} <span class="small">· ${k.ok ? "ok" : k.level}</span></div><div class="detail">${esc(k.detail)}</div></div></div>`).join("");
     const m = s.host.mem, memPct = Math.round((m.usedBytes / m.totalBytes) * 100);
@@ -241,7 +284,15 @@ details summary { cursor: pointer; color: var(--text-2); }
     $("#architect").innerHTML = s.queue.map((q) => `<div class="small">${esc(q.project)}: last review ${q.lastReview ? when(q.lastReview) + " (" + age(q.lastReview) + " ago)" : "never"}${q.push ? " · pull requests on" : " · pull requests off"}</div>`).join("")
       + (s.architect.timer ? `<div class="small">timer ${s.architect.timer.active ? "active, next " + esc(s.architect.timer.next) : "inactive"}</div>` : "")
       + (s.architect.digestExcerpt ? `<details open><summary>Latest digest (${esc(when(s.architect.digestAt))})</summary><pre>${esc(s.architect.digestExcerpt)}</pre></details>` : `<p class="empty">no digest yet</p>`);
-    $("#agents-intro").textContent = `${s.agents.length} agents registered. The architect chooses among them by description; each one advertises one skill, verifies its own output, and reports done, attention or failed.`;
+    $("#proposals").innerHTML = (s.proposals || []).length ? s.proposals.map((p) => {
+      const a = p.proposal || {};
+      return `<div class="agent proposal" data-pid="${p.id}"><div class="head"><b>${esc(p.name)}</b><span class="tag">${esc(a.runtime || "?")}</span>${a.commits ? `<span class="tag on">commits</span>` : ""}${a.shell && a.shell.length ? `<span class="tag">shell: ${esc(a.shell.join(", "))}</span>` : ""}${p.times > 1 ? `<span class="tag">asked ${p.times}×</span>` : ""}</div>
+        <div>${esc(a.description || "")}</div><div class="why small"><b>why:</b> ${esc(a.why || "")}</div>
+        ${a.inputs ? `<div class="small"><b>task must include:</b> ${esc(a.inputs)}</div>` : ""}${a.outputs ? `<div class="small"><b>produces:</b> ${esc(a.outputs)}</div>` : ""}
+        <div class="stats">proposed ${esc(age(p.ts))} ago by ${esc(p.proposed_by)}${p.task_id ? ` for #${p.task_id}` : ""}${p.project ? ` in ${esc(p.project)}` : ""}</div>
+        <div class="actions"><code>agentpipe agents new ${esc(p.name)} --from ${p.id}</code><button type="button" data-action="dismiss" data-pid="${p.id}">Dismiss</button><span class="note"></span></div></div>`;
+    }).join("") : `<p class="empty">none open</p>`;
+    $("#agents-intro").textContent = `${s.agents.length} agents registered. The architect chooses among them by description; each one advertises one skill, verifies its own output, and reports done, attention, failed or cancelled.`;
     $("#agents").innerHTML = s.agents.map((a) => {
       const st = a.stats || {};
       const tags = [
@@ -276,6 +327,37 @@ details summary { cursor: pointer; color: var(--text-2); }
     $("#footer").textContent = `${s.host.name} · agentpipe status · ${s.queue.map((q) => q.project + " at " + q.path).join("; ")}`;
   }
 
+  function fillSelect(sel, names, preferred) {
+    const cur = sel.value || preferred || "";
+    sel.innerHTML = names.map((n) => `<option${n === cur ? " selected" : ""}>${esc(n)}</option>`).join("");
+  }
+
+  async function api(path, body) {
+    const res = await fetch(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body || {}), signal: AbortSignal.timeout(15000) });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.ok === false) throw new Error(data.error || `HTTP ${res.status}`);
+    return data;
+  }
+
+  const STOPPED = new Set(["attention", "failed", "cancelled", "blocked"]);
+  function detailHtml(d) {
+    const t = d.task;
+    const canRetry = ["attention", "failed", "cancelled"].includes(t.status);
+    const canCancel = ["queued", "blocked", "attention", "failed", "running", "waiting", "review"].includes(t.status);
+    const stopped = STOPPED.has(t.status);
+    return `<td colspan="6"><div><b>${esc(t.title)}</b> · ${badge(t.status)} · ${esc(t.agent)} · priority ${t.priority} · attempts ${t.attempts}${t.parent_id ? ` · child of #${t.parent_id}` : ""}${t.depends_on.length ? ` · after ${t.depends_on.map((x) => "#" + x).join(", ")}` : ""}${t.cost_usd ? ` · $${Number(t.cost_usd).toFixed(2)}` : ""}</div>
+      ${t.branch ? `<div class="small">branch ${esc(t.branch)}${t.base_branch ? " from " + esc(t.base_branch) : ""}${t.pr_url ? ` · <a href="${esc(t.pr_url)}" target="_blank" rel="noopener">pull request</a>` : ""}</div>` : ""}${t.run_dir ? `<div class="small">run dir ${esc(t.run_dir)}</div>` : ""}
+      ${t.error ? `<div class="small" style="color:var(--critical-text);margin-top:4px">${esc(t.error)}</div>` : ""}
+      <details${stopped ? "" : " open"}><summary>task description</summary><pre>${esc(t.description)}</pre></details>
+      ${t.summary ? `<details${stopped ? " open" : ""}><summary>${t.status === "attention" ? "what the agent asks" : "agent report"}</summary><pre>${esc(t.summary)}</pre></details>` : ""}
+      ${d.report && d.report !== t.summary ? `<details><summary>run report (report.md)</summary><pre>${esc(d.report)}</pre></details>` : ""}
+      ${d.children.length ? `<div class="small" style="margin-top:8px">children: ${d.children.map((c) => `#${c.id} ${esc(c.status)} ${esc(c.title)}`).join(" · ")}</div>` : ""}
+      ${d.replies.length ? `<ul class="replies">${d.replies.map((r) => `<li><div class="who">${esc(r.author)} · ${esc(when(r.ts))}</div>${esc(r.text)}</li>`).join("")}</ul>` : ""}
+      <form class="reply-form" data-id="${t.id}"><textarea name="text" placeholder="${stopped ? "Answer the agent or tell it what to do differently. The task is requeued and the agent sees your reply with its previous report." : "A note for the agent's next run (does not requeue)."}"></textarea>
+        <div class="actions"><button class="primary" type="submit">${stopped ? "Reply and continue" : "Add note"}</button>${canRetry ? `<button type="button" data-action="retry" data-id="${t.id}">Retry as is</button>` : ""}${canCancel ? `<button type="button" class="danger" data-action="cancel" data-id="${t.id}">Cancel task</button>` : ""}<span class="note"></span></div></form>
+      <details><summary>events (${d.events.length})</summary><pre>${d.events.map((e) => esc(e.ts.slice(0, 19) + " " + e.kind + ": " + e.message)).join("\n")}</pre></details></td>`;
+  }
+
   function renderHistory() {
     if (!snapshot) return;
     const rows = (extraHistory || snapshot.history).filter((t) => (!$("#f-status").value || t.status === $("#f-status").value) && (!$("#f-agent").value || t.agent === $("#f-agent").value) && (!$("#f-q").value || t.title.toLowerCase().includes($("#f-q").value.toLowerCase())));
@@ -291,7 +373,9 @@ details summary { cursor: pointer; color: var(--text-2); }
       snapshot = await res.json();
       try { localStorage.setItem(KEY, JSON.stringify(snapshot)); } catch {}
       setOnline(true);
+      const open = openIds();
       render(snapshot);
+      reopen(open);
     } catch (e) {
       if (!snapshot) { try { snapshot = JSON.parse(localStorage.getItem(KEY) || "null"); } catch {} }
       setOnline(false);
@@ -300,25 +384,85 @@ details summary { cursor: pointer; color: var(--text-2); }
     }
   }
 
+  async function openDetail(row) {
+    const id = row.dataset.id;
+    let tr = row.nextElementSibling;
+    if (!tr || !tr.classList.contains("detail")) {
+      tr = document.createElement("tr");
+      tr.className = "detail";
+      tr.innerHTML = `<td colspan="6">loading #${id}…</td>`;
+      row.after(tr);
+    }
+    try {
+      const d = await (await fetch(`/api/task/${id}`, { signal: AbortSignal.timeout(8000) })).json();
+      if (d.error) throw new Error(d.error);
+      tr.innerHTML = detailHtml(d);
+    } catch (e) { tr.innerHTML = `<td colspan="6" class="empty">could not load #${id}: ${esc(String(e))}</td>`; }
+  }
+
+  // Detail rows keep their place across polls: after a re-render, reopen the ones that were open.
+  const openIds = () => [...document.querySelectorAll("tr.detail")].map((tr) => tr.previousElementSibling?.dataset.id).filter(Boolean);
+  function reopen(ids) { for (const id of ids) { const row = document.querySelector(`tr.row[data-id="${id}"]`); if (row) openDetail(row); } }
+
+  function setNote(el, text, err) { if (!el) return; el.textContent = text || ""; el.classList.toggle("err", Boolean(err)); }
+
   document.addEventListener("click", async (ev) => {
+    const btn = ev.target.closest("button[data-action]");
+    if (btn) {
+      ev.preventDefault();
+      const note = btn.parentElement.querySelector(".note");
+      const id = btn.dataset.id, action = btn.dataset.action;
+      try {
+        btn.disabled = true;
+        if (action === "dismiss") { await api(`/api/proposal/${btn.dataset.pid}/dismiss`); btn.closest(".proposal").remove(); if (!$("#proposals").children.length) $("#proposals").innerHTML = `<p class="empty">none open</p>`; return; }
+        if (action === "cancel") {
+          const reason = prompt(`Cancel #${id}? Optionally say why (kept as the task's reason).`, "");
+          if (reason === null) { btn.disabled = false; return; }
+          const r = await api(`/api/task/${id}/cancel`, { reason });
+          setNote(note, r.note);
+        } else if (action === "retry") {
+          const r = await api(`/api/task/${id}/retry`);
+          setNote(note, r.note);
+        }
+        await poll();
+      } catch (e) { setNote(note, String(e.message || e), true); btn.disabled = false; }
+      return;
+    }
     const row = ev.target.closest("tr.row");
     if (!row || ev.target.closest("a")) return;
     const next = row.nextElementSibling;
     if (next && next.classList.contains("detail")) { next.remove(); return; }
-    const id = row.dataset.id;
-    const tr = document.createElement("tr");
-    tr.className = "detail";
-    tr.innerHTML = `<td colspan="6">loading #${id}…</td>`;
-    row.after(tr);
+    openDetail(row);
+  });
+
+  document.addEventListener("submit", async (ev) => {
+    const form = ev.target.closest("form.reply-form");
+    if (!form) return;
+    ev.preventDefault();
+    const note = form.querySelector(".note"), text = form.querySelector("textarea").value.trim();
+    if (!text) { setNote(note, "write something first", true); return; }
+    const submit = form.querySelector("button[type=submit]");
     try {
-      const d = await (await fetch(`/api/task/${id}`, { signal: AbortSignal.timeout(8000) })).json();
-      const t = d.task;
-      tr.innerHTML = `<td colspan="6"><div><b>${esc(t.title)}</b> · ${esc(t.agent)} · priority ${t.priority} · attempts ${t.attempts}${t.parent_id ? ` · child of #${t.parent_id}` : ""}${t.depends_on.length ? ` · after ${t.depends_on.map((x) => "#" + x).join(", ")}` : ""}</div>
-        ${t.branch ? `<div class="small">branch ${esc(t.branch)}${t.base_branch ? " from " + esc(t.base_branch) : ""}</div>` : ""}${t.run_dir ? `<div class="small">run dir ${esc(t.run_dir)}</div>` : ""}
-        <pre>${esc(t.description)}</pre>${t.summary ? `<pre>${esc(t.summary)}</pre>` : ""}
-        ${d.children.length ? `<div class="small" style="margin-top:8px">children: ${d.children.map((c) => `#${c.id} ${esc(c.status)} ${esc(c.title)}`).join(" · ")}</div>` : ""}
-        <details><summary>events (${d.events.length})</summary><pre>${d.events.map((e) => esc(e.ts.slice(0, 19) + " " + e.kind + ": " + e.message)).join("\n")}</pre></details></td>`;
-    } catch (e) { tr.innerHTML = `<td colspan="6" class="empty">could not load #${id}: ${esc(String(e))}</td>`; }
+      submit.disabled = true;
+      const r = await api(`/api/task/${form.dataset.id}/reply`, { text });
+      setNote(note, r.note);
+      await poll();
+    } catch (e) { setNote(note, String(e.message || e), true); submit.disabled = false; }
+  });
+
+  $("#add-toggle").addEventListener("click", () => { $("#add-panel").classList.toggle("show"); if ($("#add-panel").classList.contains("show")) $("#add-desc").focus(); });
+  $("#add-cancel").addEventListener("click", () => $("#add-panel").classList.remove("show"));
+  $("#add-panel").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const note = $("#add-note");
+    try {
+      $("#add-submit").disabled = true;
+      const r = await api("/api/tasks", { project: $("#add-project").value, agent: $("#add-agent").value, description: $("#add-desc").value, priority: $("#add-prio").value || null, acceptance: $("#add-accept").value.split("\n").map((x) => x.trim()).filter(Boolean) });
+      setNote(note, `#${r.task.id} queued for ${r.task.agent} in ${r.task.project}${r.notes.length ? ". " + r.notes.join("; ") : ""}`);
+      $("#add-desc").value = ""; $("#add-accept").value = ""; $("#add-prio").value = "";
+      await poll();
+    } catch (e) { setNote(note, String(e.message || e), true); }
+    finally { $("#add-submit").disabled = false; }
   });
   $("#refresh").addEventListener("click", (e) => { e.preventDefault(); poll(); });
   for (const id of ["#f-status", "#f-agent"]) $(id).addEventListener("change", renderHistory);

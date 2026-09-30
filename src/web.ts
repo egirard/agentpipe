@@ -1,11 +1,12 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { addTask, cancelTask, replyToTask, retryTask, viewProposal } from "./actions.ts";
 import { latestDigest } from "./architect.ts";
-import { agentpipeRoot, dataDir, type GlobalConfig } from "./global.ts";
+import { agentpipeRoot, currentProject, dataDir, loadGlobalConfig, projectStatus, type GlobalConfig } from "./global.ts";
 import { loadRegistry } from "./registry.ts";
 import type { Store, Task } from "./store.ts";
-import { log, setLogFile, sh } from "./util.ts";
+import { clip, log, setLogFile, sh } from "./util.ts";
 
 /**
  * `agentpipe web`: the status page. A small Bun server that reads the queue database and probes
@@ -16,6 +17,11 @@ import { log, setLogFile, sh } from "./util.ts";
  * mothership is down the page still opens and says so, with the last snapshot it saw. Service
  * workers need a secure context, hence the HTTPS listener with a self-signed certificate that
  * the browser trusts once (download it from /ca.crt).
+ *
+ * Besides reading, the page can do what the CLI does to the queue: add a task, reply to one that
+ * asked something, retry, cancel, dismiss an agent proposal. Those are POSTs with a JSON body and
+ * are accepted only from the page's own origin (or a non-browser client): a form on some other
+ * site cannot send a JSON body without a preflight, and the preflight is refused.
  */
 
 export interface WebOpts {
@@ -93,6 +99,18 @@ function pidAlive(file: string): number | null {
   }
 }
 
+/** The first lines of a report as one plain line: what an attention task is asking, for the list. */
+function summaryHead(s: string | null, max = 240): string | null {
+  if (!s) return null;
+  const text = s
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/^#+\s*/gm, "")
+    .replace(/[*_`>]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return text ? clip(text, max) : null;
+}
+
 function taskRow(t: Task) {
   const durSec = t.started_at && t.finished_at ? Math.round((Date.parse(t.finished_at) - Date.parse(t.started_at)) / 1000) : null;
   return {
@@ -111,10 +129,25 @@ function taskRow(t: Task) {
     branch: t.branch,
     pr_url: t.pr_url,
     error: t.error ? t.error.slice(0, 300) : null,
+    /** What the agent is asking or reporting, for tasks that stopped; null otherwise. */
+    ask: t.status === "attention" || t.status === "cancelled" || t.status === "failed" ? summaryHead(t.summary) : null,
     created_by: t.created_by,
     round: t.round,
     attempts: t.attempts,
+    triaged: t.triaged,
   };
+}
+
+/** One task in full, for the detail view: record, events, children, replies, and the run report. */
+export function taskDetail(store: Store, id: number) {
+  const t = store.get(id);
+  if (!t) return null;
+  let report: string | null = null;
+  if (t.run_dir) {
+    const f = path.join(t.run_dir, "report.md");
+    if (existsSync(f)) report = clip(readFileSync(f, "utf8"), 20_000);
+  }
+  return { task: t, events: store.events(t.id), children: store.children(t.id).map(taskRow), replies: store.replies(t.id), report };
 }
 
 
@@ -138,11 +171,19 @@ export async function collectStatus(store: Store, gcfg: GlobalConfig, o: WebOpts
   const workerPid = pidAlive(path.join(dataDir(), "worker.pid"));
   const workerLog = path.join(dataDir(), "worker.log");
   const workerLogAge = existsSync(workerLog) ? Math.round((Date.now() - statSync(workerLog).mtimeMs) / 1000) : null;
-  const projects = Object.keys(gcfg.projects);
+  // Current project first, archived ones left out.
+  const current = currentProject(gcfg);
+  const projects = Object.keys(gcfg.projects)
+    .filter((p) => projectStatus(gcfg.projects[p]) !== "archived")
+    .sort((a, b) => Number(b === current) - Number(a === current));
   const queue = projects.map((p) => ({
     project: p,
     path: gcfg.projects[p].path,
     push: gcfg.projects[p].push,
+    current: p === current,
+    status: gcfg.projects[p].pending?.length ? "held" : projectStatus(gcfg.projects[p]),
+    goal: gcfg.projects[p].goal ?? null,
+    branch: gcfg.projects[p].parent ? `${gcfg.projects[p].base} of ${gcfg.projects[p].parent}` : null,
     counts: store.counts(p),
     running: store.list({ project: p, status: ["running"] }).map(taskRow),
     next: store.list({ project: p, status: ["queued"], limit: 8 }).map(taskRow),
@@ -197,6 +238,7 @@ export async function collectStatus(store: Store, gcfg: GlobalConfig, o: WebOpts
     budgets: { todayUsd: Math.round(today * 100) / 100, weekUsd: Math.round(week.total * 100) / 100, weekCalls: week.calls, dailyCapUsd: gcfg.budgets.dailyUsd, taskCapUsd: gcfg.budgets.taskUsd, byAgent: week.byAgent, byProject: week.byProject },
     lanes: Object.entries(gcfg.worker.lanes).map(([lane, slots]) => ({ lane, slots, running: store.list({ status: ["running"] }).filter((t) => t.lane === lane).map((t) => t.id) })),
     agents: agentCatalog(store, registry, gcfg),
+    proposals: store.proposals("open").map(viewProposal),
     checks,
     totals,
     queue,
@@ -306,15 +348,93 @@ function contentType(p: string): string {
   return "application/octet-stream";
 }
 
-export async function runWeb(store: Store, gcfg: GlobalConfig, o: WebOpts) {
-  setLogFile(path.join(dataDir(), "web.log"));
-  const tls = await ensureCert();
+class BadRequest extends Error {
+  constructor(message: string, readonly status = 400) {
+    super(message);
+  }
+}
 
-  const handler = async (req: Request): Promise<Response> => {
+/**
+ * Same-origin guard for writes. Browsers send Sec-Fetch-Site on every request; anything but
+ * same-origin/none is refused. A body that is not JSON is refused too, which is what stops a
+ * plain HTML form on another site (forms cannot send application/json without a preflight).
+ */
+async function jsonBody(req: Request): Promise<Record<string, any>> {
+  const site = req.headers.get("sec-fetch-site");
+  if (site && site !== "same-origin" && site !== "none") throw new BadRequest(`cross-site request refused (${site})`, 403);
+  if (!/^application\/json\b/i.test(req.headers.get("content-type") ?? "")) throw new BadRequest("send a JSON body (content-type: application/json)", 415);
+  const body = await req.json().catch(() => null);
+  if (!body || typeof body !== "object" || Array.isArray(body)) throw new BadRequest("body must be a JSON object");
+  return body;
+}
+
+function who(req: Request): string {
+  const ua = req.headers.get("user-agent") ?? "";
+  return `web${/Mobile|Android|iPhone|iPad/.test(ua) ? " (phone)" : ""}`;
+}
+
+/** The request handler, separated from the listeners so tests can call it. `gcfg` is re-read on writes so a project added meanwhile counts. */
+export function createHandler(store: Store, gcfg: GlobalConfig, o: WebOpts, tls: { cert: string; key: string } | null) {
+  return async (req: Request): Promise<Response> => {
     const url = new URL(req.url);
     const headers: Record<string, string> = { "access-control-allow-origin": "*", "cache-control": "no-store" };
     try {
       if (url.pathname === "/healthz") return new Response("ok\n", { headers });
+      if (req.method === "OPTIONS") return new Response(null, { status: 405, headers: { "cache-control": "no-store" } });
+
+      // ---- writes: what the CLI does, from the page ----
+      if (req.method === "POST") {
+        const fresh = (() => {
+          try {
+            return (gcfg = loadGlobalConfig());
+          } catch {
+            return gcfg;
+          }
+        })();
+        const by = who(req);
+        if (url.pathname === "/api/tasks") {
+          const b = await jsonBody(req);
+          const { task, notes } = addTask(store, fresh, {
+            project: typeof b.project === "string" ? b.project : null,
+            agent: typeof b.agent === "string" ? b.agent : null,
+            title: typeof b.title === "string" ? b.title : null,
+            description: typeof b.description === "string" ? b.description : "",
+            priority: b.priority == null || b.priority === "" ? null : Number(b.priority),
+            acceptance: Array.isArray(b.acceptance) ? b.acceptance.map(String) : typeof b.acceptance === "string" ? b.acceptance.split(/\s*;\s*|\n/) : null,
+            files: Array.isArray(b.files) ? b.files.map(String) : typeof b.files === "string" ? b.files.split(/[,\s]+/) : null,
+            depends_on: Array.isArray(b.depends_on) ? b.depends_on.map(Number) : null,
+            created_by: by,
+          });
+          log(`web: ${by} queued #${task.id} for ${task.agent} in ${task.project}: ${task.title}`);
+          return Response.json({ ok: true, task: taskRow(task), notes }, { status: 201, headers });
+        }
+        const tm = url.pathname.match(/^\/api\/task\/(\d+)\/(reply|retry|cancel)$/);
+        if (tm) {
+          const id = Number(tm[1]);
+          const b = await jsonBody(req);
+          if (tm[2] === "reply") {
+            const r = replyToTask(store, id, typeof b.text === "string" ? b.text : "", by, { requeue: b.requeue !== false });
+            log(`web: ${by} replied to #${id}${r.requeued ? " (requeued)" : ""}`);
+            return Response.json({ ok: true, task: taskRow(r.task), requeued: r.requeued, note: r.note, ...taskDetail(store, id) }, { headers });
+          }
+          if (tm[2] === "retry") {
+            const t = retryTask(store, id, by);
+            log(`web: ${by} retried #${id}`);
+            return Response.json({ ok: true, task: taskRow(t), note: `#${id} requeued` }, { headers });
+          }
+          const c = cancelTask(store, id, by, typeof b.reason === "string" ? b.reason : null);
+          log(`web: ${by} cancelled #${id}`);
+          return Response.json({ ok: true, task: taskRow(c.task), note: c.note ?? `#${id} cancelled` }, { headers });
+        }
+        const pm = url.pathname.match(/^\/api\/proposal\/(\d+)\/(dismiss|reopen)$/);
+        if (pm) {
+          await jsonBody(req);
+          const row = store.setProposalStatus(Number(pm[1]), pm[2] === "dismiss" ? "dismissed" : "open");
+          return Response.json({ ok: true, proposal: viewProposal(row) }, { headers });
+        }
+        return Response.json({ ok: false, error: "no such action" }, { status: 404, headers });
+      }
+
       if (url.pathname === "/api/status") {
         const limit = Math.min(500, Number(url.searchParams.get("history") ?? 40) || 40);
         return Response.json(await collectStatus(store, gcfg, o, limit), { headers });
@@ -329,6 +449,10 @@ export async function runWeb(store: Store, gcfg: GlobalConfig, o: WebOpts) {
         return Response.json({ history: rows }, { headers });
       }
       if (url.pathname === "/api/agents") return Response.json({ agents: agentCatalog(store, loadRegistry(), gcfg), problems: loadRegistry().problems }, { headers });
+      if (url.pathname === "/api/proposals") {
+        const all = url.searchParams.get("all") === "1";
+        return Response.json({ proposals: store.proposals(all ? undefined : "open").map(viewProposal) }, { headers });
+      }
       if (url.pathname === "/api/spend") {
         const days = Math.min(90, Number(url.searchParams.get("days") ?? 7) || 7);
         const since = new Date(Date.now() - days * 86400_000).toISOString();
@@ -337,9 +461,9 @@ export async function runWeb(store: Store, gcfg: GlobalConfig, o: WebOpts) {
       }
       const m = url.pathname.match(/^\/api\/task\/(\d+)$/);
       if (m) {
-        const t = store.get(Number(m[1]));
-        if (!t) return Response.json({ error: "no such task" }, { status: 404, headers });
-        return Response.json({ task: t, events: store.events(t.id), children: store.children(t.id).map(taskRow) }, { headers });
+        const d = taskDetail(store, Number(m[1]));
+        if (!d) return Response.json({ error: "no such task" }, { status: 404, headers });
+        return Response.json(d, { headers });
       }
       if (url.pathname === "/ca.crt") {
         if (!tls) return new Response("no certificate on this server\n", { status: 404, headers });
@@ -355,10 +479,19 @@ export async function runWeb(store: Store, gcfg: GlobalConfig, o: WebOpts) {
       }
       return new Response("not found\n", { status: 404, headers });
     } catch (e) {
-      log(`web: ${url.pathname} failed: ${(e as Error).message}`);
-      return Response.json({ ok: false, error: (e as Error).message }, { status: 500, headers });
+      if (e instanceof BadRequest) return Response.json({ ok: false, error: e.message }, { status: e.status, headers });
+      // Validation errors from the actions (unknown agent, empty description...) are the caller's fault, not ours.
+      const status = req.method === "POST" ? 400 : 500;
+      if (status === 500) log(`web: ${url.pathname} failed: ${(e as Error).message}`);
+      return Response.json({ ok: false, error: (e as Error).message }, { status, headers });
     }
   };
+}
+
+export async function runWeb(store: Store, gcfg: GlobalConfig, o: WebOpts) {
+  setLogFile(path.join(dataDir(), "web.log"));
+  const tls = await ensureCert();
+  const handler = createHandler(store, gcfg, o, tls);
 
   const http = Bun.serve({ hostname: o.host, port: o.port, fetch: handler, idleTimeout: 30 });
   log(`web: http://${os.hostname()}:${http.port}/  (also by IP)`);

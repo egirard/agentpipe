@@ -7,9 +7,14 @@ import { dataDir } from "./global.ts";
  * architect, a reviewer) finishes by creating children; the parent waits until every child has
  * reached a terminal state, then goes to `review` for the architect's next wake-up.
  *
- *  queued ──▶ running ──▶ done | attention | failed
+ *  queued ──▶ running ──▶ done | attention | failed | cancelled
  *     │          └──▶ waiting (children created) ──▶ review ──▶ done | attention | waiting (next round)
  *     └──▶ blocked (a dependency ended badly) ──▶ queued (retried) | cancelled
+ *
+ * attention, failed and cancelled are exits a human (or the architect) can reopen: `retry`, or a
+ * `reply` that answers what the agent asked, requeues the task, and is shown to the agent on its
+ * next run. `cancelled` is the exit for tasks that proved impossible or moot: they leave "needs
+ * you", do not count against an agent's track record, and stay in the history.
  *
  * Several projects (repositories) share one queue; every task carries its project name.
  */
@@ -76,6 +81,30 @@ export interface TaskEvent {
   ts: string;
   kind: string;
   message: string;
+}
+
+/** A human's answer to a task that stopped (attention, failed, cancelled). Shown to the agent on its next run. */
+export interface Reply {
+  id: number;
+  task_id: number;
+  ts: string;
+  author: string;
+  text: string;
+}
+
+/** An agent an architect wished it had. Recorded, never created automatically. */
+export interface ProposalRow {
+  id: number;
+  ts: string;
+  task_id: number | null;
+  project: string | null;
+  proposed_by: string;
+  name: string;
+  /** The AgentProposal as JSON (src/result.ts). */
+  spec: string;
+  status: "open" | "dismissed" | "created";
+  /** How many times an agent asked for this one while it was open. */
+  times: number;
 }
 
 export interface UsageRow {
@@ -152,6 +181,26 @@ CREATE TABLE IF NOT EXISTS usage (
   seconds REAL NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS usage_ts ON usage(ts);
+CREATE TABLE IF NOT EXISTS replies (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id INTEGER NOT NULL,
+  ts TEXT NOT NULL,
+  author TEXT NOT NULL,
+  text TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS replies_task ON replies(task_id, id);
+CREATE TABLE IF NOT EXISTS agent_proposals (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts TEXT NOT NULL,
+  task_id INTEGER,
+  project TEXT,
+  proposed_by TEXT NOT NULL,
+  name TEXT NOT NULL,
+  spec TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'open',
+  times INTEGER NOT NULL DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS agent_proposals_status ON agent_proposals(status, name);
 `;
 
 /** Columns added after the first release; applied with ALTER TABLE when missing. */
@@ -299,11 +348,13 @@ export class Store {
 
   /**
    * Atomically take the next runnable task: queued, every dependency done, lowest priority
-   * number first, then oldest. `agents` restricts to the agents a lane serves. Returns null
-   * when nothing is runnable.
+   * number first, then oldest. `agents` restricts to the agents a lane serves, `projects` to
+   * the projects that may run (active, not held); `prefer` (the current project) goes ahead of
+   * the others. Returns null when nothing is runnable.
    */
-  claimNext(opts: { project?: string; agents?: string[]; lane?: string } = {}): Task | null {
+  claimNext(opts: { project?: string; projects?: string[]; prefer?: string | null; agents?: string[]; lane?: string } = {}): Task | null {
     if (opts.agents && opts.agents.length === 0) return null;
+    if (opts.projects && opts.projects.length === 0) return null;
     const tx = this.db.transaction(() => {
       const params: any[] = [];
       const where: string[] = ["t.status = 'queued'"];
@@ -311,10 +362,15 @@ export class Store {
         where.push("t.project = ?");
         params.push(opts.project);
       }
+      if (opts.projects) {
+        where.push(`t.project IN (${opts.projects.map(() => "?").join(",")})`);
+        params.push(...opts.projects);
+      }
       if (opts.agents) {
         where.push(`t.agent IN (${opts.agents.map(() => "?").join(",")})`);
         params.push(...opts.agents);
       }
+      params.push(opts.prefer ?? "");
       const r = this.db
         .query(
           `SELECT t.* FROM tasks t
@@ -322,7 +378,7 @@ export class Store {
              AND NOT EXISTS (
                SELECT 1 FROM json_each(t.depends_on) d JOIN tasks x ON x.id = d.value WHERE x.status != 'done'
              )
-           ORDER BY t.priority ASC, t.id ASC LIMIT 1`,
+           ORDER BY (t.project = ?) DESC, t.priority ASC, t.id ASC LIMIT 1`,
         )
         .get(...params);
       const t = this.row(r);
@@ -334,12 +390,16 @@ export class Store {
     return tx();
   }
 
-  /** Tasks the architect's review cycle must look at. */
+  /**
+   * Tasks the architect's review cycle must look at: parents whose children all finished, and
+   * top-level tasks that stopped (attention, failed, blocked, or cancelled by an agent) and that
+   * nobody has looked at. A human's cancel or the architect's own decisions set triaged.
+   */
   needsTriage(project: string, limit: number): Task[] {
     return this.db
       .query(
         `SELECT * FROM tasks WHERE project = ? AND (
-           status = 'review' OR (status IN ('attention','failed','blocked') AND triaged = 0 AND parent_id IS NULL)
+           status = 'review' OR (status IN ('attention','failed','blocked','cancelled') AND triaged = 0 AND parent_id IS NULL)
          ) ORDER BY priority ASC, id ASC LIMIT ?`,
       )
       .all(project, limit)
@@ -403,6 +463,63 @@ export class Store {
       }
     }
     return out;
+  }
+
+  /**
+   * Put a stopped task back in the queue (a retry, or a human's reply). Its error and triage mark
+   * are cleared. A parent the architect already looked at (`review`, or `attention` because of
+   * this child) goes back to `waiting`, so the tree converges through the architect again once the
+   * child finishes instead of leaving the child's outcome orphaned.
+   */
+  requeue(id: number, message: string): Task {
+    const t = this.get(id);
+    if (!t) throw new Error(`no task #${id}`);
+    this.update(id, { error: null, triaged: 0 });
+    const out = this.setStatus(id, "queued", message);
+    if (t.parent_id) {
+      const parent = this.get(t.parent_id);
+      if (parent && (parent.status === "review" || parent.status === "attention")) this.setStatus(parent.id, "waiting", `child #${id} was requeued`);
+    }
+    return out;
+  }
+
+  /* ---------- replies: the human answering an agent ---------- */
+
+  reply(taskId: number, author: string, text: string): Reply {
+    const r = this.db.query("INSERT INTO replies (task_id, ts, author, text) VALUES (?, ?, ?, ?) RETURNING *").get(taskId, now(), author, text) as Reply;
+    this.event(taskId, "reply", `${author}: ${text.replace(/\s+/g, " ")}`);
+    return r;
+  }
+
+  replies(taskId: number): Reply[] {
+    return this.db.query("SELECT * FROM replies WHERE task_id = ? ORDER BY id").all(taskId) as Reply[];
+  }
+
+  /* ---------- agent proposals: agents that should exist ---------- */
+
+  /** Record a proposal; an open one with the same name is refreshed and counted instead of duplicated. */
+  proposeAgent(p: { name: string; spec: object; task_id: number | null; project: string | null; proposed_by: string }): ProposalRow {
+    const open = this.db.query("SELECT * FROM agent_proposals WHERE name = ? AND status = 'open' LIMIT 1").get(p.name) as ProposalRow | null;
+    if (open) {
+      this.db.query("UPDATE agent_proposals SET ts = ?, task_id = ?, project = ?, proposed_by = ?, spec = ?, times = times + 1 WHERE id = ?").run(now(), p.task_id, p.project, p.proposed_by, JSON.stringify(p.spec), open.id);
+      return this.db.query("SELECT * FROM agent_proposals WHERE id = ?").get(open.id) as ProposalRow;
+    }
+    return this.db.query("INSERT INTO agent_proposals (ts, task_id, project, proposed_by, name, spec) VALUES (?, ?, ?, ?, ?, ?) RETURNING *").get(now(), p.task_id, p.project, p.proposed_by, p.name, JSON.stringify(p.spec)) as ProposalRow;
+  }
+
+  proposals(status?: ProposalRow["status"]): ProposalRow[] {
+    return (status ? this.db.query("SELECT * FROM agent_proposals WHERE status = ? ORDER BY times DESC, id DESC").all(status) : this.db.query("SELECT * FROM agent_proposals ORDER BY id DESC").all()) as ProposalRow[];
+  }
+
+  proposal(id: number): ProposalRow | null {
+    return (this.db.query("SELECT * FROM agent_proposals WHERE id = ?").get(id) as ProposalRow | null) ?? null;
+  }
+
+  setProposalStatus(id: number, status: ProposalRow["status"]): ProposalRow {
+    this.db.query("UPDATE agent_proposals SET status = ? WHERE id = ?").run(status, id);
+    const r = this.proposal(id);
+    if (!r) throw new Error(`no agent proposal #${id}`);
+    return r;
   }
 
   /** Same agent, same project, same title, still open: a duplicate. */

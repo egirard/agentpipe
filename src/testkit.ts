@@ -61,7 +61,7 @@ export function fakeContext(over: Partial<VerifyContext> & { result: AgentResult
   const { files: _f, ...rest } = over;
   return {
     task,
-    manifest: { name: "test", description: "test agent for verify", runtime: "shell", when_to_use: "", inputs: "", outputs: "", can_delegate: false, commits: false, model: "", tools: [], shell: [], paths: [], lane: "cloud", max_turns: 1, timeout_sec: 60, context: [], task_prefix: "", command: "true", prompt: "", verify: "", tags: [], enabled: true, source: "", dir: null, verifier: null, hasTests: false, extras: [], version: "test" },
+    manifest: { name: "test", description: "test agent for verify", runtime: "shell", when_to_use: "", inputs: "", outputs: "", can_delegate: false, commits: false, can_create_projects: false, model: "", tools: [], shell: [], paths: [], lane: "cloud", max_turns: 1, timeout_sec: 60, context: [], task_prefix: "", command: "true", prompt: "", verify: "", tags: [], enabled: true, source: "", dir: null, verifier: null, hasTests: false, extras: [], version: "test" },
     projectName: "test",
     project: { path: "/nonexistent", base: "main", push: false },
     repo: "/nonexistent",

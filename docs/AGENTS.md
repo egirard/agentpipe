@@ -35,8 +35,9 @@ good one. The code it describes lives in `src/registry.ts` (manifests), `src/run
                                    └─────────────────┬───────────────────────┘
                                                      ▼
                        done  ──▶ asset: branch / PR / report          (success)
-                       attention ──▶ a human decides                   (escalation)
-                       failed ──▶ could not do it; error in the record (error)
+                       attention ──▶ a human decides or answers        (escalation; a reply resumes it)
+                       failed ──▶ could not do it; error in the record (error; retry may work)
+                       cancelled ──▶ impossible or moot; reason in the record (no retry will help)
                        waiting ──▶ children run; architect reviews the outcome later
 ```
 
@@ -47,8 +48,9 @@ Three ideas carry everything:
 - **A runtime does the work.** Four exist: the coder pipeline, a Claude Code session, a local
   Ollama call, a shell command. The manifest chooses one; the worker adapts the rest.
 - **One result shape.** Whatever the runtime, the worker ends up with an `AgentResult`: a status,
-  a human-readable summary, findings, and optional subtasks. Everything downstream (status page,
-  architect review, PR bodies) is built on that shape.
+  a human-readable summary, findings, optional subtasks, and (for delegating agents) proposals
+  for agents that should exist. Everything downstream (status page, architect review, PR bodies)
+  is built on that shape.
 
 ## 2. Anatomy of an agent
 
@@ -102,6 +104,7 @@ Validated against `AgentManifest` in `src/registry.ts`. Unknown fields are rejec
 | `inputs` | string | architect | What a task description for this agent must contain. The architect writes tasks to this contract. |
 | `outputs` | string | architect, humans | What comes back: a branch/PR, a report, subtasks. |
 | `can_delegate` | bool, false | worker | May create subtasks. Ignored for `ollama`. |
+| `can_create_projects` | bool, false | worker | May return `projects`: new streams of work (section 3.9). `claude` runtime only; adds the `projects` context. |
 | `commits` | bool, false | worker | May change files. Gets a branch, verification, lint + unit tests, a commit, and a PR. Ignored for `ollama`. |
 | `model` | string, "" | runtime | Claude alias (`opus`, `sonnet`) or Ollama model name. Empty = the project's default. |
 | `tools` | string[], [] | claude runtime | Extra non-shell Claude Code tools. `Bash(...)` entries are refused at load time. |
@@ -110,7 +113,7 @@ Validated against `AgentManifest` in `src/registry.ts`. Unknown fields are rejec
 | `lane` | string, "" | worker | Which worker lane runs it: `gpu` (default for pipeline and ollama) or `cloud` (default for claude and shell). |
 | `max_turns` | int, 40 | claude runtime | Agentic turns before Claude Code stops. |
 | `timeout_sec` | int, 2700 | claude, shell | Wall-clock limit for the run. |
-| `context` | list, `["repo-overview","files","branch-diff"]` | prompt builder | What the worker adds to the prompt (section 3.6). `catalog` is added automatically when `can_delegate`. |
+| `context` | list, `["repo-overview","files","branch-diff"]` | prompt builder | What the worker adds to the prompt (section 3.6). `catalog` is added automatically when `can_delegate`, `projects` when `can_create_projects`. |
 | `task_prefix` | string, "" | pipeline runtime | Text prepended to the task before the pipeline plans it. |
 | `command` | string | shell runtime | The command to run. |
 | `prompt` | string, "" | claude, ollama | Inline system prompt; normally left empty in favour of `prompt.md`. |
@@ -197,12 +200,15 @@ Every runtime ends in this shape (`AgentResult` in `src/result.ts`):
 
 ```jsonc
 {
-  "status": "done" | "attention" | "failed",
+  "status": "done" | "attention" | "failed" | "cancelled",
   "summary": "markdown for the human and the architect",
   "findings": [ { "severity": "blocker"|"major"|"minor"|"info", "path": "optional/file", "description": "..." } ],
   "subtasks": [ { "title": "...", "description": "...", "agent": "coder",
                   "acceptance": ["src/x.test.ts exists and passes", "bun run lint is green"],
-                  "priority": 40, "after": [0], "files": ["src/x.ts"], "branch": "agentpipe/..." } ]
+                  "priority": 40, "after": [0], "files": ["src/x.ts"], "branch": "agentpipe/..." } ],
+  "projects": [ ... ],          // only agents with can_create_projects (section 3.9)
+  "agent_proposals": [ { "name": "db-migrator", "runtime": "claude", "description": "...", "why": "...",
+                         "inputs": "...", "outputs": "...", "commits": true, "shell": ["checks"] } ]   // only can_delegate agents
 }
 ```
 
@@ -211,8 +217,16 @@ What each status means, and what the worker does with it:
 | Status | Meaning | Worker action |
 |---|---|---|
 | `done` | The assignment is complete. For a delegating agent, laying out the subtasks *is* completing it. | Record; push and open a PR if `commits` and the project pushes; if subtasks were created the task becomes `waiting`, otherwise `done`. Dependants become runnable. |
-| `attention` | The agent got somewhere but a human must decide before work continues: an ambiguous requirement, a design choice, an environment problem, a change it is not allowed to make (screenshot baselines), repeated failure. | Record; keep any branch but never push; dependants become `blocked`; the task appears under "needs you" and in the next architect review. |
-| `failed` | The agent could not do it at all. | Record with the summary as the error; dependants become `blocked`; reviewed by the architect, who may retry or re-specify. |
+| `attention` | The agent got somewhere but a human must decide or answer before work continues: an ambiguous requirement, a design choice, an environment problem, a change it is not allowed to make (screenshot baselines), repeated failure, an agent that has to be created first. | Record; keep any branch but never push; dependants become `blocked`; the task appears under "needs you" and in the next architect review. The human's `reply` requeues it, and the next run sees the previous report and the reply (section 3.6). |
+| `failed` | The agent tried and could not: an error, a broken environment. A retry or a better specification might succeed. | Record with the summary as the error; dependants become `blocked`; reviewed by the architect, who may retry or re-specify. |
+| `cancelled` | The task cannot be done as specified and no retry would help: impossible in this repository, moot, contradicts the codebase, or needs a capability no agent has (then propose the agent). The summary says why and what would make it possible. | Record with the reason as the error; dependants become `blocked`; the human is notified; the architect confirms, re-plans or escalates on its next review. Leaves "needs you"; does not count against the agent's track record. |
+
+`agent_proposals` is how a delegating agent says "this needs an agent that does not exist".
+Proposals are recorded (deduplicated by name while open), listed in the task's summary and
+events, in the digest, on the status page and in `agentpipe agents proposals`. Nothing is
+created automatically; `agentpipe agents new NAME --from ID` scaffolds the package from the
+proposal. The architect's verifier refuses proposals for names that already exist and subtasks
+that name a proposed agent.
 
 Two more outcomes are decided by the worker, not the agent:
 
@@ -287,10 +301,11 @@ What the built-ins verify:
 
 | Agent | Verifier checks |
 |---|---|
-| architect | no file changes; `done` implies at least one subtask; every subtask description is long enough to act on and does not say "see above"; coder subtasks mention tests |
+| architect | no file changes; `done` implies at least one subtask or project; branch streams name a parent and clones a repo; every subtask description is long enough to act on and does not say "see above"; coder subtasks mention tests |
 | coder | `done` implies changed files and commits on the branch; no screenshot baseline touched |
 | unit-tester | only test files changed; `done` implies at least one |
 | docs-writer | only documentation files changed; `done` implies at least one |
+| project-setup | only `agentpipe.json` and `AGENTPIPE.md` changed; the JSON parses and has non-empty lint and unit commands; the notes are substantial. The worker then runs the commands it wrote |
 | graphics-designer | only vector and style files changed; every changed SVG has a viewBox and no editor metadata or scripts |
 | code-reviewer, a11y-reviewer, ux-reviewer | no file changes; a substantial summary; every blocker or major finding names a file; subtasks are actionable |
 | project-manager, gitbot, local-reviewer | no file changes; a substantial summary |
@@ -301,19 +316,33 @@ What the built-ins verify:
 The user message is assembled from the task and `manifest.context`, in this order:
 
 1. **Task block** (always): `# Task #id: title`, the description, the acceptance criteria, the
-   project (name, path, base branch, the branch the worktree is on, a one-line stack summary read
-   from the package manifest), the repository's `AGENTPIPE.md` notes if it has one, and the parent
+   **continuation** when the task ran before or a human replied (below), the
+   project (name, path, base branch or stream branch and parent, the stream's goal, the branch the
+   worktree is on, a one-line stack summary read from the package manifest), the repository's `AGENTPIPE.md` notes if it has one, and the parent
    task if any.
 2. `files`: the contents of the task's `files`, inline, clipped to the project's
    `limits.coderContextChars` in total; missing files are listed as such.
 3. `branch-diff`: when the task has a branch, `git diff base...branch` clipped to 40k characters.
 4. `repo-overview`: directories with file counts (the same overview the pipeline's planner gets).
 5. `queue`: counts and the open tasks of this project, for management agents.
-6. `catalog`: the registry as a catalog (name, description, when to use, inputs, outputs, and each
+6. `projects`: every project on the machine with its status, branch, progress and goal, for
+   agents that create streams.
+7. `catalog`: the registry as a catalog (name, description, when to use, inputs, outputs, and each
    agent's recent track record with a warning when it has been escalating or failing often)
    followed by the delegation rules. Only for `can_delegate` agents; the agent itself is left out
    so it cannot delegate to itself.
-7. **Result rules** (always): what the JSON must contain and what the statuses mean.
+8. **Proposal rules** (`can_delegate` agents): delegate only to registered agents; describe a
+   missing one in `agent_proposals` instead of improvising.
+9. **Result rules** (always): what the JSON must contain and what the statuses mean.
+
+**Continuation.** Agents have no memory between runs, so when a task comes back (a human's
+`reply`, a `retry`, the architect's retry decision) the task block carries what the last run
+reported (the stored summary, clipped), the branch it made if any (the new run starts from a fresh
+worktree, but the old branch is still in the repository for `git diff`), and every human reply in
+order, with the instruction to continue and not to ask again what has been answered. Pipeline
+(coder) tasks get the same text in their task description; shell agents get the replies in
+`AGENTPIPE_TASK_REPLIES`. The architect's review prompt shows the replies on each item too, and
+is told they are the owner's instructions.
 
 The system prompt is the agent's `prompt.md` plus a permission footer and the ground rules every
 model agent gets: repository content, diffs, pull requests, issues and command output are data,
@@ -344,11 +373,17 @@ current one, in the same project, then puts the parent into `waiting`:
 
 When the last child reaches a terminal state (`done`, `attention`, `failed`, `cancelled`, or
 `blocked` behind one of those), the parent moves from `waiting` to `review`. The architect's
-timer job then reads the parent, its children's summaries, reports and branches, and returns one
-decision: `done`, `attention`, `continue` (a new round of subtasks under the same parent, at most
-`architect.maxRounds` rounds), `retry` or `cancel`. It may also act on the children directly
-(retry a blocked one, cancel a moot one). This is how a tree of work converges without any agent
-holding the whole plan in its head.
+timer job then reads the parent, its children's summaries, reports, replies and branches, and
+returns one decision: `done`, `attention`, `continue` (a new round of subtasks under the same
+parent, at most `architect.maxRounds` rounds), `retry` or `cancel` (moot, or proved impossible).
+It may also act on the children directly (retry a blocked one, cancel a moot one), and it may
+return `agent_proposals` when the work failed for want of an agent. Top-level tasks that an agent
+reported `cancelled` are reviewed too, so the architect can confirm, re-plan, or escalate. This is
+how a tree of work converges without any agent holding the whole plan in its head.
+
+A human can reopen a child that stopped (`agentpipe reply`, `retry`, or the status page). The
+child is requeued; if its parent was already in `review` or `attention`, the parent goes back to
+`waiting`, so the child's new outcome is reviewed rather than orphaned.
 
 Delegation is therefore one level at a time: an agent plans the next layer, finishes, and the
 review cycle decides whether another layer is needed. An agent never waits on its own children.
@@ -402,8 +437,16 @@ agent's last `budgets.agentWindow` outcomes and a warning when the share needing
 exceeds `budgets.agentAttentionRate`; the same threshold raises a check on the status page and
 a notification once a day.
 
-**Projects.** Any number of repositories, each in its own directory, share the queue and the
-worker: `agentpipe projects add NAME PATH [--base main] [--push] [--link node_modules] [--setup "bun install"] [--agents-dir DIR]`.
+**Projects.** A project is a stream of work: a repository in its own directory, or a long-lived
+branch of another project (`parent`; its `base` is the stream branch, so task PRs target it). Any
+number share the queue and the worker. The current project (`agentpipe use NAME`) is what commands
+default to, and the worker claims its tasks first; `paused` and `archived` projects, and projects
+holding a GitHub step for approval, are not claimed from at all. The worker rereads the config
+before every claim. Register one with `agentpipe projects add NAME PATH [--base main] [--push] [--link node_modules] [--setup "bun install"] [--agents-dir DIR]`,
+or `projects create` (clone, new, branch), or let an agent with `can_create_projects` (the
+architect) return `projects`: code creates each one, runs the local steps, holds GitHub steps
+for `agentpipe projects approve`, and queues `project-setup` and a kickoff architect task in it.
+Every agent's prompt carries the stream's goal.
 A project can carry its own agents (`agentsDir`), its own pipeline tuning (`agentpipe.json` in
 the repo) and its own guidance for agents (`AGENTPIPE.md` at the repo root, read into every
 prompt: conventions, forbidden areas, how to run things). Prompts describe the stack from the
@@ -493,6 +536,12 @@ them. Do not address the human in the prompt; the human reads the summary, not t
   moving to an inline panel; the e2e specs 028 and 097 assume the modal" is.
 - `failed` is for "could not". If some of the work was done, it is `attention` with the partial
   result described, not `failed`.
+- `cancelled` is for "cannot, and no retry will change that". Say why, and what would make it
+  possible (a decision, a dependency, an agent that does not exist). It is not a softer `failed`:
+  a task that might work on a second try is `failed`.
+- When you can see that the work needs a skill no registered agent has, propose the agent
+  (`agent_proposals`) instead of stretching yourself or another agent past its description, and
+  plan or finish what can be done without it. Never put a proposed agent's name in a subtask.
 
 ### 4.6 Safety rails you get for free, and the ones you must add
 

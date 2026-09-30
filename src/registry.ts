@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSy
 import path from "node:path";
 import { z } from "zod";
 import { agentpipeRoot, configDir, type ProjectConfig } from "./global.ts";
+import type { AgentProposal } from "./result.ts";
 import { SHELL_GROUPS } from "./shell-policy.ts";
 import { sha1 } from "./util.ts";
 
@@ -28,7 +29,7 @@ import { sha1 } from "./util.ts";
 export const Runtime = z.enum(["pipeline", "claude", "ollama", "shell"]);
 export type Runtime = z.infer<typeof Runtime>;
 
-export const ContextKind = z.enum(["repo-overview", "files", "branch-diff", "queue", "catalog"]);
+export const ContextKind = z.enum(["repo-overview", "files", "branch-diff", "queue", "catalog", "projects"]);
 export type ContextKind = z.infer<typeof ContextKind>;
 
 export const AgentManifest = z.object({
@@ -42,6 +43,7 @@ export const AgentManifest = z.object({
   outputs: z.string().default("").describe("What the agent produces: a branch/PR, a report, subtasks."),
   can_delegate: z.boolean().default(false).describe("May create subtasks for other agents."),
   commits: z.boolean().default(false).describe("May change files. The worker gives it a branch, verifies, runs lint + unit tests, commits, and opens a PR."),
+  can_create_projects: z.boolean().default(false).describe("May propose new projects (streams of work) in its result. Code creates them; GitHub steps wait for the human."),
   model: z.string().default("").describe("Claude Code model alias (claude runtime) or Ollama model (ollama runtime). Empty = project default."),
   tools: z.array(z.string()).default([]).describe("Extra non-shell Claude Code tools. Bash(...) entries are refused here: shell access is granted through `shell` groups only."),
   shell: z.array(z.string()).default([]).describe("Shell capability groups from src/shell-policy.ts: git-read, gh-read, gh-comment, checks, package-read, ops (shell-runner only). Enforced by allowedTools and a PreToolUse hook."),
@@ -129,6 +131,11 @@ function loadOne(manifestPath: string, promptPath: string, dir: string | null, r
   if (m.runtime === "ollama" && m.can_delegate) reg.problems.push(`${manifestPath}: ollama agents cannot delegate reliably; can_delegate ignored`);
   if (m.runtime === "ollama" && m.commits) reg.problems.push(`${manifestPath}: ollama agents cannot edit files; commits ignored`);
   if (m.can_delegate && !m.context.includes("catalog")) m.context = [...m.context, "catalog"];
+  if (m.can_create_projects && m.runtime !== "claude") {
+    reg.problems.push(`${manifestPath}: only claude agents can create projects; can_create_projects ignored`);
+    m.can_create_projects = false;
+  }
+  if (m.can_create_projects && !m.context.includes("projects")) m.context = [...m.context, "projects"];
   return m;
 }
 
@@ -202,25 +209,31 @@ export function renderCatalog(reg: Registry, names = [...reg.agents.keys()], hea
   return lines.join("\n");
 }
 
-/** `agentpipe agents new NAME`: a complete agent package in the machine directory (or --dir). */
-export function scaffoldAgent(name: string, runtime: Runtime, root = path.join(configDir(), "agents")): string[] {
+/**
+ * `agentpipe agents new NAME`: a complete agent package in the machine directory (or --dir).
+ * With `from` (an architect's proposal) the manifest starts out filled in from what the architect
+ * asked for; the prompt still has to be written by a human.
+ */
+export function scaffoldAgent(name: string, runtime: Runtime, root = path.join(configDir(), "agents"), from?: AgentProposal): string[] {
   AgentManifest.shape.name.parse(name);
   const dir = path.join(root, name);
   if (existsSync(dir)) throw new Error(`${dir} already exists`);
   mkdirSync(path.join(dir, "tests"), { recursive: true });
   const manifest: Record<string, unknown> = {
     name,
-    description: `TODO: one or two sentences the architect can choose this agent by.`,
+    description: from?.description ?? `TODO: one or two sentences the architect can choose this agent by.`,
     runtime,
-    when_to_use: "TODO: when this agent is right, and when it is not.",
-    inputs: "TODO: what the task description must contain",
-    outputs: runtime === "pipeline" ? "A branch with commits and, when green, a pull request." : "A report with findings; optionally subtasks.",
+    when_to_use: from ? `Proposed by the architect because: ${from.why}` : "TODO: when this agent is right, and when it is not.",
+    inputs: from?.inputs || "TODO: what the task description must contain",
+    outputs: from?.outputs || (runtime === "pipeline" ? "A branch with commits and, when green, a pull request." : "A report with findings; optionally subtasks."),
     can_delegate: runtime === "claude",
-    commits: false,
+    commits: from?.commits ?? false,
     context: ["repo-overview", "files", "branch-diff"],
-    tags: [],
+    tags: from ? ["proposed"] : [],
   };
-  if (runtime === "claude") manifest.shell = ["git-read"];
+  const shell = (from?.shell ?? []).filter((g) => SHELL_GROUPS[g] && g !== "ops");
+  if (runtime === "claude") manifest.shell = shell.length ? shell : ["git-read"];
+  else if (shell.length) manifest.shell = shell;
   if (runtime === "shell") manifest.command = "echo TODO";
   if (runtime === "pipeline") manifest.task_prefix = "";
   const written: string[] = [];
@@ -230,7 +243,7 @@ export function scaffoldAgent(name: string, runtime: Runtime, root = path.join(c
   };
   write("agent.json", JSON.stringify(manifest, null, 2) + "\n");
   if (runtime === "claude" || runtime === "ollama") {
-    write("prompt.md", `You are the ${name} agent in an automated development pipeline.\n\nTODO, in this order: your role and setting; what to examine and how; what a good result contains (findings with file paths, what becomes a subtask vs a recommendation); what not to do; how to decide between status done and attention for this role.\n`);
+    write("prompt.md", `You are the ${name} agent in an automated development pipeline.${from ? `\n\nThe architect asked for this agent because: ${from.why}\nIt should: ${from.description}` : ""}\n\nTODO, in this order: your role and setting; what to examine and how; what a good result contains (findings with file paths, what becomes a subtask vs a recommendation); what not to do; how to decide between status done, attention and cancelled for this role.\n`);
   }
   const lib = path.relative(dir, path.join(agentpipeRoot(), "src", "verify.ts")).split(path.sep).join("/");
   write(

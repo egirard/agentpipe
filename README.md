@@ -59,7 +59,8 @@ you ──▶ agentpipe add "goal" ──▶ [architect task] ──▶ worker r
 - **The architect** is two things. As an agent in the registry it turns a goal into subtasks.
   As the timer job `agentpipe architect review` it wakes up, reads what finished (reports, logs,
   branches, PRs), and decides per item: accept, hand to you, retry, cancel, or queue the next
-  round. Rounds per task are capped (`architect.maxRounds`), so it cannot loop forever.
+  round. Rounds per task are capped (`architect.maxRounds`), so it cannot loop forever. When
+  work failed because no agent has the skill, it proposes the agent that should exist (below).
 - **The registry** (`agentpipe agents`) is the roster the architect chooses from. See below.
 
 ### Day to day
@@ -71,25 +72,90 @@ agentpipe add --agent a11y-reviewer --files src/components/PlayerCard.svelte "Au
 agentpipe add --file backlog.md              # one task per "- [agent] text" line; agent defaults to architect
 agentpipe status                             # counts, running, what needs you, last digest
 agentpipe list                               # open tasks (--all for everything, --status done,failed)
-agentpipe show 42                            # record, summary, children, event log
-agentpipe retry 42 | cancel 42 | prio 42 10
+agentpipe show 42                            # record, summary, replies, children, event log
+agentpipe reply 42 "Blue, like the other primary buttons"   # answer a task that asked something; it continues with your answer
+agentpipe retry 42 | cancel 42 --reason "needs a DB we do not have" | prio 42 10
 agentpipe digest                             # the architect's latest write-up
+agentpipe agents proposals                   # agents the architect wished it had; create one: agentpipe agents new NAME --from ID
 journalctl --user -u agentpipe-worker -f     # live worker log (also ~/.local/share/agentpipe/worker.log)
 systemctl --user start agentpipe-architect   # wake the architect now instead of waiting for the timer
 ```
 
 A task that ends in `attention` or `failed` is yours: `agentpipe show` has the summary and the
-run directory with full logs. Fix the cause and `agentpipe retry`, or `cancel`. Coder tasks that
-went green have a pull request link in `pr_url`; merging is always a human action.
+run directory with full logs. Three ways out:
 
-Projects are registered once each; any number of repositories in any directories share the
-queue: `agentpipe projects add ashardalon ~/src/Ashardalon --base main --push`, then
-`agentpipe projects add otherapp ~/src/otherapp --link node_modules --setup "bun install"`.
-`--push` makes green branches become pull requests; `--link` names what to symlink from your
-checkout into each worktree (default `node_modules`); `--setup` runs once per worktree. A repo
-can carry `agentpipe.json` (pipeline commands and models) and `AGENTPIPE.md` (guidance every
-agent reads: conventions, no-go areas, how to run things). `agentpipe add --project NAME` or
-running the command inside the repo picks the project.
+- `agentpipe reply ID "..."` when the agent asked something or went the wrong way. The reply is
+  stored on the task, the task is requeued, and the agent's next run starts with its previous
+  report and your answer in front of it ("continuing a task that stopped"). A reply to a task
+  that is still open is kept as a note for its next run and does not requeue. If the architect
+  had already handed the parent to you, the parent goes back to `waiting` so the tree converges
+  through the architect again once the child finishes.
+- `agentpipe retry ID` to run it again unchanged (a flaky test, a fixed environment).
+- `agentpipe cancel ID [--reason "..."]` when it proved impossible or moot. `cancelled` leaves
+  "needs you", does not count against the agent's track record, and stays in the history with
+  the reason. Agents can reach it too: an agent that finds its task impossible as specified
+  reports `cancelled` with why, the architect confirms or re-plans on its next review, and you
+  are notified like for `attention`.
+
+Coder tasks that went green have a pull request link in `pr_url`; merging is always a human action.
+
+When the architect cannot delegate part of a goal because no registered agent has the skill, it
+does not stretch an existing agent: it plans what it can and records an **agent proposal** (name,
+runtime, what it would do, why). Proposals show up in the digest, on the status page under
+"Suggested agents", and in `agentpipe agents proposals`. Nothing is created automatically:
+`agentpipe agents new NAME --from ID` scaffolds the package with the manifest filled in from the
+proposal, you write the prompt, and `agentpipe retry` (or `reply`) the task that waited for it.
+
+### Projects: streams of work
+
+A project is one stream of work with its own queue, goal and progress: a repository in its own
+directory, or a long-lived branch of another project's repository. Any number of them share the
+queue and the worker. One is **current**: every command defaults to it, and the worker takes its
+tasks first (the others keep running behind it unless you pause them).
+
+```bash
+agentpipe use                                # which project am I on?
+agentpipe use lighting                       # switch; `status`, `list`, `add` now mean lighting
+agentpipe projects                           # every stream: status, branch, open/done, goal
+agentpipe status                             # one line per stream, then the current one in detail
+agentpipe list --project all                 # tasks across every stream
+
+# ask the architect to create and configure a stream from a description
+agentpipe projects new lighting "A branch of ashardalon for reworking dungeon lighting; start by measuring torch radius"
+agentpipe add "Create a stream called tools: a new repo at ~/src/tools for asset scripts, with a private GitHub repo"
+
+# or create one yourself
+agentpipe projects create lighting --goal "..." --branch-of ashardalon [--branch lighting]
+agentpipe projects create tools --goal "..." --new [--path ~/src/tools] [--github me/tools] [--kickoff "first goal"]
+agentpipe projects create dragons --goal "..." --clone me/dragons
+agentpipe projects create legacy --goal "..." --path ~/src/legacy        # an existing checkout
+
+agentpipe projects pause|resume|archive NAME # paused/archived streams run nothing; their tasks wait
+agentpipe projects approve NAME              # run the GitHub steps an architect-made stream waits on
+agentpipe projects finish lighting           # open the PR merging the stream branch into its parent
+```
+
+What the architect may do when it creates a stream: clone a repository, `git init` a new one,
+create a stream branch, register the project, and queue its first tasks: `project-setup` (writes
+`agentpipe.json` and `AGENTPIPE.md` when the repo has none) and an architect task for the kickoff
+goal. Anything that changes GitHub (creating a repository, pushing the stream branch) is held:
+the stream does not run, the task ends in `attention`, and `agentpipe projects approve NAME` does
+it. Creating a stream yourself with `projects create` runs those steps at once.
+
+In a **branch stream** (`--branch-of`), tasks start from the stream branch and their pull
+requests target it; the stream shares its parent's checkout, setup and `agentpipe.json`. When
+it is done, `projects finish` opens the one PR into the parent's base, which you merge.
+
+Inside a registered checkout, commands pick that checkout's project (the current one if several
+streams share it, else the one whose branch is checked out). `--project NAME` or
+`AGENTPIPE_PROJECT=NAME` override everything. The worker rereads the config before every task, so
+switching, pausing and new streams take effect without a restart.
+
+`agentpipe projects add ashardalon ~/src/Ashardalon --base main --push` still registers an
+existing checkout directly (`--link` names what to symlink from your checkout into each worktree,
+default `node_modules`; `--setup` runs once per worktree). A repo can carry `agentpipe.json`
+(pipeline commands and models) and `AGENTPIPE.md` (guidance every agent reads: conventions,
+no-go areas, how to run things).
 
 ### Machine config
 
@@ -97,7 +163,10 @@ running the command inside the repo picks the project.
 
 ```json
 {
-  "projects": { "ashardalon": { "path": "/home/girard/src/Ashardalon", "base": "main", "push": true } },
+  "projects": {
+    "ashardalon": { "path": "/home/girard/src/Ashardalon", "base": "main", "push": true, "goal": "The board game in the browser" },
+    "lighting": { "path": "/home/girard/src/Ashardalon", "base": "lighting", "push": true, "parent": "ashardalon", "goal": "Rework dungeon lighting", "status": "paused" }
+  },
   "defaultProject": "ashardalon",
   "worker": { "pollSec": 30, "pauseSec": 300, "maxAttempts": 3, "lanes": { "gpu": 1, "cloud": 1 } },
   "worktrees": { "root": "", "link": ["node_modules"], "cleanup": true },
@@ -130,12 +199,25 @@ policy would say.
 
 | URL | What |
 |---|---|
-| `http://mothership.local:8081/` | the page: online/offline, queue counts, system checks (Ollama, GPU, worker, timer, Open WebUI, token, disks), machine meters, in-flight and needs-you lists, history with filters, latest architect digest, agent registry, link to the LLM chat |
+| `http://mothership.local:8081/` | the page: online/offline, queue counts and an **Add task** form (an `agentpipe add` from the browser, project and agent selectable, architect by default), system checks (Ollama, GPU, worker, timer, Open WebUI, token, disks), machine meters, in-flight and needs-you lists, history with filters, latest architect digest, suggested agents, agent registry, link to the LLM chat |
 | `https://mothership.local:8443/` | the same over HTTPS, needed for offline mode (below) |
-| `/api/status?history=60` | everything the page shows, as JSON |
+| `/api/status?history=60` | everything the page shows, as JSON (includes open agent proposals) |
 | `/api/history?limit=200&project=…` | finished tasks |
-| `/api/task/ID` | one task with events and children |
+| `/api/task/ID` | one task with events, children, replies and its `report.md` |
+| `/api/proposals?all=1` | agent proposals (open by default) |
+| `POST /api/tasks` | `{description, project?, agent?, title?, priority?, acceptance?}`: queue a task |
+| `POST /api/task/ID/reply` | `{text, requeue?}`: answer the agent; requeues a stopped task |
+| `POST /api/task/ID/retry`, `POST /api/task/ID/cancel` | `{}` / `{reason?}` |
+| `POST /api/proposal/ID/dismiss` | drop a suggested agent |
 | `/ca.crt` | the server's self-signed certificate |
+
+In the **Needs you** list an `attention` row shows what the agent is asking; clicking a row opens
+the task: the description, the agent's report, the run report, earlier replies, and a reply box.
+"Reply and continue" stores the answer and requeues the task; "Retry as is" and "Cancel task" do
+what the CLI commands do. Writes are accepted only from the page's own origin with a JSON body
+(browsers send `Sec-Fetch-Site`; a form on another site cannot pass), and from non-browser
+clients such as `curl`. There is no login: the page is meant for a LAN, like the rest of the box.
+When the page is offline (stale snapshot) the buttons are disabled.
 
 The page polls every 20 seconds and keeps the last snapshot in the browser. When the server stops
 answering it switches to "offline since …" and shows the stale snapshot dimmed. For that to work
@@ -187,6 +269,7 @@ prints one; `agentpipe agents new NAME --runtime claude` scaffolds a complete pa
 | `runtime` | `pipeline`: the coder loop above. `claude`: one Claude Code session in the repo. `ollama`: one local model call. `shell`: a command. |
 | `description`, `when_to_use`, `inputs`, `outputs` | What the architect reads to pick this agent and to write it a task. Spend words here. |
 | `can_delegate` | May create subtasks. The result schema then enumerates registered agent names, so it cannot invent one. |
+| `can_create_projects` | `claude` only: may return `projects` (new streams). Code creates them; GitHub steps wait for `agentpipe projects approve`. |
 | `commits` | May change files. The worker gives it a branch, verifies, runs lint + full unit tests, commits, and pushes/opens a PR when green and the project pushes. |
 | `verify` | Output verification; defaults to `verify.ts` in the agent directory. Any problem it returns turns `done` into `attention` and blocks the push. |
 | `shell` | Shell capability groups; see "Shell access". Raw `Bash(...)` tools are refused. |
@@ -201,7 +284,7 @@ Every non-pipeline agent must answer with one JSON object: `status` (done / atte
 `summary` (markdown for humans), `findings[]`, `subtasks[]`. Then its verifier gets one look at the
 result and the changed files before anything is committed or pushed.
 
-Built-ins: `architect`, `coder`, `unit-tester`, `code-reviewer`, `local-reviewer` (Ollama, no
+Built-ins: `architect` (also creates streams), `project-setup` (writes a new stream's `agentpipe.json` and `AGENTPIPE.md`), `coder`, `unit-tester`, `code-reviewer`, `local-reviewer` (Ollama, no
 cloud), `a11y-reviewer`, `ux-reviewer`, `docs-writer`, `graphics-designer` (SVG/CSS only),
 `project-manager`, `gitbot` (reports and comments, never merges), `shell-runner` (the only agent
 with a broad, vetted shell), `e2e-runner` (shell). The status page lists them all with their

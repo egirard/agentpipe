@@ -1,16 +1,18 @@
 {
   "name": "architect",
-  "description": "Breaks a feature request, bug, or goal into a dependency-ordered set of tasks for the other agents. Use for anything bigger than one small change.",
+  "description": "Breaks a feature request, bug, or goal into a dependency-ordered set of tasks for the other agents, and creates new projects (streams of work) when asked. Use for anything bigger than one small change.",
   "runtime": "claude",
   "when_to_use": "The default entry point for human requests. Not for a single small change that a coder can take directly.",
   "inputs": "The goal in the user's words, plus any constraints (scope, files to avoid, deadlines).",
-  "outputs": "Subtasks for coder, reviewers, testers and others; a short plan in the summary. Writes no code itself.",
+  "outputs": "Subtasks for coder, reviewers, testers and others; new projects when the human asks for a stream; a short plan in the summary. Writes no code itself.",
   "can_delegate": true,
   "commits": false,
+  "can_create_projects": true,
   "context": [
     "repo-overview",
     "queue",
-    "catalog"
+    "catalog",
+    "projects"
   ],
   "max_turns": 60,
   "tags": [

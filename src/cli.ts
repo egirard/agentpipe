@@ -1,13 +1,16 @@
 #!/usr/bin/env bun
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
+import { addTask, cancelTask, replyToTask, retryTask, viewProposal } from "./actions.ts";
 import { architectReview, latestDigest } from "./architect.ts";
 import { claudeReachable } from "./claude.ts";
 import { loadConfig, loadEnvFile, type Config } from "./config.ts";
-import { agentpipeRoot, dataDir, globalConfigPath, loadGlobalConfig, resolveProject, saveGlobalConfig } from "./global.ts";
+import { agentpipeRoot, currentProject, dataDir, globalConfigPath, isRunnable, loadGlobalConfig, projectStatus, resolveProject, saveGlobalConfig, updateGlobalConfig, type GlobalConfig, type ProjectStatus } from "./global.ts";
 import { ollamaModels } from "./ollama.ts";
 import { runPipeline } from "./pipeline.ts";
 import { Plan } from "./plan.ts";
+import { approvePending, createProject, finishStream, queueStreamStart } from "./projects.ts";
+import { AgentProposal, ProjectSpec } from "./result.ts";
 import { loadRegistry, requireAgent, scaffoldAgent, Runtime } from "./registry.ts";
 import { hasGitIdentity, repoStack } from "./repo.ts";
 import { shellCheckMain } from "./shell-policy.ts";
@@ -18,13 +21,17 @@ import { runWorker } from "./worker.ts";
 
 const USAGE = `agentpipe - local-first coding pipeline with a task queue and an agent registry
 
+Every command works on the current project unless --project P (or AGENTPIPE_PROJECT) names
+another; inside a registered checkout, that checkout's project. --project all widens status/list.
+
 Queue (the normal way to hand work to the system):
   agentpipe add [--project P] [--agent NAME] [--priority N] [--after 12,13] [--files a.ts,b.ts] [--branch B] [--accept "crit 1;crit 2"] "what to do"
   agentpipe add --file TASKS.md|.json [...]   # bulk: "- [agent] task" lines, or a JSON array of {title,description,agent,...}
-  agentpipe status [--project P]              # counts, what is running, what needs you, latest digest
-  agentpipe list [--project P] [--status queued,running,...] [--all]
-  agentpipe show ID                           # full record, events, children
-  agentpipe cancel ID | retry ID | prio ID N
+  agentpipe status [--project P|all]          # every project in a line, then the current one in detail
+  agentpipe list [--project P|all] [--status queued,running,...] [--all]
+  agentpipe show ID                           # full record, events, replies, children
+  agentpipe reply ID "answer" [--no-requeue]  # answer a task that stopped (attention/failed/cancelled); it is requeued and the agent continues with your reply
+  agentpipe retry ID | cancel ID [--reason "why"] | prio ID N   # cancelled = impossible or moot; leaves "needs you", stays in history
   agentpipe worker [--once] [--project P]     # drain the queue (normally a systemd user service)
   agentpipe architect review [--project P] [--dry-run]   # the architect's wake-up (normally a systemd timer)
   agentpipe digest                            # print the latest architect digest
@@ -33,12 +40,22 @@ Queue (the normal way to hand work to the system):
 Registry:
   agentpipe agents                            # list agents the architect can delegate to
   agentpipe agents show NAME                  # manifest, prompt, verifier, tests, extra files
-  agentpipe agents new NAME [--runtime claude|ollama|pipeline|shell] [--dir DIR]   # scaffold a package
+  agentpipe agents new NAME [--runtime claude|ollama|pipeline|shell] [--dir DIR] [--from ID]   # scaffold a package (--from: fill it in from a proposal)
   agentpipe agents test [NAME] [--e2e]        # bun test for one agent or all (--e2e runs the real agent on a scratch repo)
+  agentpipe agents proposals [--all]          # agents the architect wished it had (from tasks it could not fully delegate)
+  agentpipe agents dismiss ID                 # drop a proposal
 
-Projects (any number of repositories, each in its own directory; one queue and worker serve them all):
-  agentpipe projects                          # list
-  agentpipe projects add NAME PATH [--base main] [--push] [--default] [--link node_modules,.svelte-kit] [--setup "bun install"] [--agents-dir DIR]
+Projects: streams of work. Each is a repository in its own directory, or a long-lived branch of
+another project. One queue and worker serve them all; the current project's tasks run first.
+  agentpipe use [NAME]                        # show or switch the current project
+  agentpipe projects                          # list with status, goal and progress ("streams" works too)
+  agentpipe projects new NAME "what it is for"   # ask the architect to create and configure it
+  agentpipe projects create NAME --goal "..." [--path DIR | --clone URL|owner/name | --new [--github owner/name] | --branch-of PARENT [--branch B]]
+                            [--base B] [--push|--no-push] [--setup CMD] [--link a,b] [--kickoff "first goal"] [--use]
+  agentpipe projects add NAME PATH [--base main] [--push] [--default] [--goal "..."] [--link node_modules,.svelte-kit] [--setup "bun install"] [--agents-dir DIR]
+  agentpipe projects pause|resume|archive NAME    # paused and archived projects run nothing
+  agentpipe projects approve NAME             # run the GitHub steps an architect-created project is waiting on
+  agentpipe projects finish NAME              # branch stream: open the PR merging it into its parent
   agentpipe projects remove NAME
   agentpipe spend [--days 7]                  # Claude spend by day, agent and project
 
@@ -58,7 +75,7 @@ Files: ~/.config/agentpipe/agentpipe.json (projects), ~/.config/agentpipe/env (C
 function parseArgs(argv: string[]) {
   const flags: Record<string, string | boolean> = {};
   const positional: string[] = [];
-  const valued = new Set(["repo", "project", "agent", "priority", "after", "files", "branch", "file", "status", "base", "runtime", "title", "port", "tls-port", "host", "webui", "dir", "accept", "link", "setup", "agents-dir", "days"]);
+  const valued = new Set(["repo", "project", "agent", "priority", "after", "files", "branch", "file", "status", "base", "runtime", "title", "port", "tls-port", "host", "webui", "dir", "accept", "link", "setup", "agents-dir", "days", "goal", "path", "clone", "github", "branch-of", "kickoff", "reason", "from"]);
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a.startsWith("--")) {
@@ -159,6 +176,15 @@ function parseBulk(file: string): { title: string; description: string; agent?: 
   return out;
 }
 
+/** One line per project for `status` and `use`: current marker, state, progress, goal. */
+function projectLine(g: GlobalConfig, name: string, store: Store): string {
+  const p = g.projects[name];
+  const c = store.counts(name);
+  const state = p.pending?.length ? "held for approval" : projectStatus(p);
+  const parts = [c.running && `${c.running} running`, c.queued && `${c.queued} queued`, c.attention + c.failed + c.blocked && `${c.attention + c.failed + c.blocked} need you`, `${c.done} done`].filter(Boolean);
+  return `${currentProject(g) === name ? "*" : " "} ${name} [${state}${p.parent ? `, branch ${p.base} of ${p.parent}` : ""}] ${parts.join(", ")}${p.goal ? ` - ${p.goal.replace(/\s+/g, " ").slice(0, 80)}` : ""}`;
+}
+
 async function main() {
   // Helper scripts (agentpipe-e2e) and user tools live here even when a systemd unit gives us a bare PATH.
   process.env.PATH = [path.join(agentpipeRoot(), "scripts"), path.join(process.env.HOME ?? "", ".local", "bin"), process.env.PATH ?? ""].join(":");
@@ -177,28 +203,58 @@ async function main() {
       const g = loadGlobalConfig();
       const { name: project } = resolveProject(g, str(flags.project));
       const store = new Store();
-      const reg = loadRegistry(g.projects[project]);
-      const defaultAgent = str(flags.agent) ?? "architect";
       const priority = flags.priority ? Number(flags.priority) : undefined;
       const after = str(flags.after)?.split(",").filter(Boolean).map(Number) ?? [];
       const files = str(flags.files)?.split(",").filter(Boolean) ?? [];
       const acceptance = str(flags.accept)?.split(/\s*;\s*/).map((a) => a.trim()).filter(Boolean) ?? [];
       const items = flags.file ? parseBulk(str(flags.file)!) : [{ title: str(flags.title) ?? positional.join(" ").split("\n")[0].slice(0, 120), description: positional.join(" ").trim() }];
       if (!items.length || items.some((i) => !i.description)) throw new Error("add needs a task description (or --file with tasks)");
+      const notes = new Set<string>();
       for (const it of items) {
-        const agent = (it as any).agent ?? defaultAgent;
-        requireAgent(reg, agent);
-        const t = store.add({ project, agent, title: it.title, description: it.description, acceptance: (it as any).acceptance ?? acceptance, priority: (it as any).priority ?? priority, depends_on: after, files: (it as any).files ?? files, branch: str(flags.branch) ?? null, created_by: process.env.USER ?? "cli" });
-        console.log(`#${t.id} queued for ${agent} in ${project}: ${t.title}`);
+        const { task: t, notes: n } = addTask(store, g, {
+          project,
+          agent: (it as any).agent ?? str(flags.agent) ?? "architect",
+          title: it.title,
+          description: it.description,
+          acceptance: (it as any).acceptance ?? acceptance,
+          priority: (it as any).priority ?? priority,
+          depends_on: after,
+          files: (it as any).files ?? files,
+          branch: str(flags.branch) ?? null,
+          created_by: process.env.USER ?? "cli",
+        });
+        console.log(`#${t.id} queued for ${t.agent} in ${project}: ${t.title}`);
+        for (const x of n) notes.add(x);
       }
+      for (const n of notes) console.log(`note: ${n}`);
       const lock = path.join(dataDir(), "worker.pid");
       if (!existsSync(lock)) console.log("note: no worker is running. Start it: systemctl --user start agentpipe-worker   (or: agentpipe worker)");
+      break;
+    }
+    case "use": {
+      const g = loadGlobalConfig();
+      const name = positional[0];
+      if (!name) {
+        const cur = currentProject(g);
+        console.log(cur ? projectLine(g, cur, new Store()) : "no current project (agentpipe use NAME)");
+        break;
+      }
+      const p = g.projects[name];
+      if (!p) throw new Error(`unknown project "${name}"; known: ${Object.keys(g.projects).join(", ") || "(none)"}`);
+      if (projectStatus(p) === "archived") throw new Error(`${name} is archived; agentpipe projects resume ${name} first`);
+      updateGlobalConfig((c) => void (c.defaultProject = name));
+      console.log(`now on ${projectLine(loadGlobalConfig(), name, new Store())}`);
+      if (!isRunnable(p)) console.log(`note: ${name} is ${p.pending?.length ? "waiting for approval: agentpipe projects approve " + name : projectStatus(p) + ": agentpipe projects resume " + name}`);
       break;
     }
     case "status": {
       const g = loadGlobalConfig();
       const store = new Store();
-      const projects = flags.project ? [str(flags.project)!] : Object.keys(g.projects);
+      const all = flags.project === "all";
+      const focus = all ? null : flags.project || process.env.AGENTPIPE_PROJECT ? resolveProject(g, str(flags.project)).name : currentProject(g);
+      const listed = Object.keys(g.projects).filter((n) => all || projectStatus(g.projects[n]) !== "archived");
+      if (!all) for (const n of listed) console.log(projectLine(g, n, store));
+      const projects = all ? listed : focus ? [focus] : [];
       for (const p of projects) {
         const c = store.counts(p);
         console.log(`\n${p}: ${Object.entries(c).filter(([, n]) => n).map(([s, n]) => `${s} ${n}`).join(", ") || "empty"}`);
@@ -226,13 +282,15 @@ async function main() {
       const g = loadGlobalConfig();
       const store = new Store();
       const status = str(flags.status)?.split(",") as TaskStatus[] | undefined;
-      let rows = store.list({ project: str(flags.project), status });
+      const everywhere = flags.project === "all" || !Object.keys(g.projects).length;
+      const project = everywhere ? undefined : resolveProject(g, str(flags.project)).name;
+      let rows = store.list({ project, status });
       if (!status && !flags.all) rows = rows.filter((t) => !["done", "cancelled"].includes(t.status) || (Date.now() - Date.parse(t.finished_at ?? t.created_at)) < 86400_000);
+      if (project) console.log(`${project}:`);
       table(
-        rows.map((t) => [`#${t.id}`, t.status, t.agent, t.parent_id ? `#${t.parent_id}` : "", String(t.priority), t.title.slice(0, 70), t.pr_url ?? (t.branch ?? ""), fmtAge(t.finished_at ?? t.started_at ?? t.created_at)]),
-        ["id", "status", "agent", "parent", "prio", "title", "pr/branch", "age"],
+        rows.map((t) => [`#${t.id}`, ...(everywhere ? [t.project] : []), t.status, t.agent, t.parent_id ? `#${t.parent_id}` : "", String(t.priority), t.title.slice(0, 70), t.pr_url ?? (t.branch ?? ""), fmtAge(t.finished_at ?? t.started_at ?? t.created_at)]),
+        ["id", ...(everywhere ? ["project"] : []), "status", "agent", "parent", "prio", "title", "pr/branch", "age"],
       );
-      void g;
       break;
     }
     case "show": {
@@ -247,6 +305,11 @@ async function main() {
       if (files.length) console.log(`files        ${files.join(", ")}`);
       console.log(`\n--- description ---\n${description}`);
       if (summary) console.log(`\n--- summary ---\n${summary}`);
+      const replies = store.replies(id);
+      if (replies.length) {
+        console.log("\n--- replies ---");
+        for (const r of replies) console.log(`${r.ts.slice(0, 19)} ${r.author}: ${r.text}`);
+      }
       const kids = store.children(id);
       if (kids.length) {
         console.log("\n--- children ---");
@@ -257,25 +320,30 @@ async function main() {
       break;
     }
     case "cancel": {
-      const store = new Store();
       const id = Number(positional[0]);
-      const t = store.get(id);
-      if (!t) throw new Error(`no task #${id}`);
-      if (t.status === "running") console.log("note: the worker is running this task; it will finish the current agent call, then the result is recorded but children are still created. Stop the worker to abort it.");
-      store.setStatus(id, "cancelled", `by ${process.env.USER ?? "cli"}`);
-      store.update(id, { triaged: 1 });
-      store.settleParent(id);
-      console.log(`#${id} cancelled`);
+      if (!Number.isInteger(id)) throw new Error('usage: agentpipe cancel ID [--reason "why"]');
+      const r = cancelTask(new Store(), id, process.env.USER ?? "cli", str(flags.reason) ?? positional.slice(1).join(" "));
+      console.log(`#${id} cancelled${r.task.error ? `: ${r.task.error}` : ""}`);
+      if (r.note) console.log(`note: ${r.note}`);
       break;
     }
     case "retry": {
-      const store = new Store();
       const id = Number(positional[0]);
-      const t = store.get(id);
-      if (!t) throw new Error(`no task #${id}`);
-      store.update(id, { error: null, triaged: 0 });
-      store.setStatus(id, "queued", `retry by ${process.env.USER ?? "cli"}`);
-      console.log(`#${id} requeued`);
+      if (!Number.isInteger(id)) throw new Error("usage: agentpipe retry ID");
+      const t = retryTask(new Store(), id, process.env.USER ?? "cli");
+      console.log(`#${id} ${t.status === "queued" ? "requeued" : t.status}`);
+      break;
+    }
+    case "reply": {
+      const id = Number(positional.shift());
+      if (!Number.isInteger(id)) throw new Error('usage: agentpipe reply ID "your answer" [--no-requeue]   (or pipe the text on stdin)');
+      let text = positional.join(" ").trim();
+      if (!text && !process.stdin.isTTY) text = (await Bun.stdin.text()).trim();
+      if (!text) throw new Error("reply needs some text: what should the agent know or do?");
+      const r = replyToTask(new Store(), id, text, process.env.USER ?? "cli", { requeue: !flags["no-requeue"] });
+      console.log(r.note);
+      const lock = path.join(dataDir(), "worker.pid");
+      if (r.requeued && !existsSync(lock)) console.log("note: no worker is running. Start it: systemctl --user start agentpipe-worker   (or: agentpipe worker)");
       break;
     }
     case "prio": {
@@ -359,9 +427,40 @@ async function main() {
         if (prompt) console.log(`\n--- prompt ---\n${prompt}`);
       } else if (sub === "new") {
         const name = positional[0];
-        if (!name) throw new Error("usage: agentpipe agents new NAME [--runtime claude|ollama|pipeline|shell] [--dir DIR]");
-        const files = scaffoldAgent(name, Runtime.parse(str(flags.runtime) ?? "claude"), str(flags.dir) ? path.resolve(str(flags.dir)!) : undefined);
-        console.log(`created:\n${files.map((f) => "  " + f).join("\n")}\nEdit them, then 'agentpipe agents' should list ${name} and 'agentpipe agents test ${name}' should pass.`);
+        if (!name) throw new Error("usage: agentpipe agents new NAME [--runtime claude|ollama|pipeline|shell] [--dir DIR] [--from PROPOSAL_ID]");
+        let from: AgentProposal | undefined;
+        let store: Store | undefined;
+        if (flags.from) {
+          store = new Store();
+          const row = store.proposal(Number(flags.from));
+          if (!row) throw new Error(`no agent proposal #${flags.from} (agentpipe agents proposals --all)`);
+          from = AgentProposal.parse(JSON.parse(row.spec));
+          if (from.name !== name) console.log(`note: proposal #${row.id} was for "${from.name}"; creating "${name}" from it`);
+        }
+        const files = scaffoldAgent(name, Runtime.parse(str(flags.runtime) ?? from?.runtime ?? "claude"), str(flags.dir) ? path.resolve(str(flags.dir)!) : undefined, from);
+        if (store && flags.from) store.setProposalStatus(Number(flags.from), "created");
+        console.log(`created:\n${files.map((f) => "  " + f).join("\n")}\n${from ? "The manifest is filled in from the proposal; the prompt is yours to write. " : ""}Edit them, then 'agentpipe agents' should list ${name} and 'agentpipe agents test ${name}' should pass.`);
+      } else if (sub === "proposals") {
+        const store = new Store();
+        const rows = store.proposals(flags.all ? undefined : "open").map(viewProposal);
+        if (!rows.length) {
+          console.log(flags.all ? "no agent proposals recorded" : "no open agent proposals (--all shows dismissed and created ones)");
+          break;
+        }
+        for (const r of rows) {
+          const p = r.proposal;
+          console.log(`#${r.id} ${p.name} (${p.runtime}${p.commits ? ", commits" : ""}${p.shell.length ? `, shell: ${p.shell.join(",")}` : ""}) [${r.status}${r.times > 1 ? `, asked ${r.times}x` : ""}] proposed ${fmtAge(r.ts)} ago by ${r.proposed_by}${r.task_id ? ` for #${r.task_id}` : ""}${r.project ? ` in ${r.project}` : ""}`);
+          console.log(`   ${p.description}`);
+          console.log(`   why: ${p.why}`);
+          if (p.inputs) console.log(`   inputs: ${p.inputs}`);
+          if (p.outputs) console.log(`   outputs: ${p.outputs}`);
+          if (r.status === "open") console.log(`   create it: agentpipe agents new ${p.name} --from ${r.id}`);
+        }
+      } else if (sub === "dismiss") {
+        const id = Number(positional[0]);
+        if (!Number.isInteger(id)) throw new Error("usage: agentpipe agents dismiss PROPOSAL_ID");
+        const r = new Store().setProposalStatus(id, "dismissed");
+        console.log(`proposal #${id} (${r.name}) dismissed`);
       } else if (sub === "test") {
         const name = positional[0];
         const targets = name ? [requireAgent(reg, name)] : [...reg.agents.values()];
@@ -371,44 +470,122 @@ async function main() {
         if (!dirs.length) break;
         const proc = Bun.spawn(["bun", "test", ...dirs], { cwd: agentpipeRoot(), stdio: ["ignore", "inherit", "inherit"], env: { ...process.env, ...(flags.e2e ? { AGENTPIPE_E2E: "1" } : {}) } });
         process.exitCode = await proc.exited;
-      } else throw new Error("usage: agentpipe agents [list|show NAME|new NAME|test [NAME]]");
+      } else throw new Error("usage: agentpipe agents [list|show NAME|new NAME [--from ID]|test [NAME]|proposals [--all]|dismiss ID]");
       break;
     }
 
     // ----- projects -----
+    case "stream":
+    case "streams":
     case "projects": {
       const sub = positional.shift();
       const g = loadGlobalConfig();
       if (!sub || sub === "list") {
-        table(Object.entries(g.projects).map(([n, p]) => [n + (g.defaultProject === n ? " *" : ""), p.path, p.base, p.push ? "yes" : "no", (p.link ?? g.worktrees.link).join(","), p.setup ?? "", p.agentsDir ?? ""]), ["name", "path", "base", "push", "link", "setup", "agentsDir"]);
-        console.log(`\nconfig: ${globalConfigPath()}`);
+        const store = new Store();
+        const cur = currentProject(g);
+        table(
+          Object.entries(g.projects)
+            .filter(([, p]) => flags.all || projectStatus(p) !== "archived")
+            .map(([n, p]) => {
+              const c = store.counts(n);
+              return [n + (cur === n ? " *" : ""), p.pending?.length ? "held" : projectStatus(p), p.parent ? `${p.parent}:${p.base}` : p.base, p.path, p.push ? "yes" : "no", `${store.openCount(n)} open, ${c.done} done${c.attention + c.failed ? `, ${c.attention + c.failed} need you` : ""}`, (p.goal ?? "").replace(/\s+/g, " ").slice(0, 60)];
+            }),
+          ["name", "status", "branch", "path", "push", "progress", "goal"],
+        );
+        console.log(`\n* = current (agentpipe use NAME). ${flags.all ? "" : "Archived projects hidden (--all). "}config: ${globalConfigPath()}`);
       } else if (sub === "add") {
         const [name, p] = positional;
-        if (!name || !p) throw new Error("usage: agentpipe projects add NAME PATH [--base main] [--push] [--default] [--link a,b] [--setup CMD] [--agents-dir DIR]");
+        if (!name || !p) throw new Error("usage: agentpipe projects add NAME PATH [--base main] [--push] [--default] [--goal TEXT] [--link a,b] [--setup CMD] [--agents-dir DIR]");
         if (!/^[a-z0-9][a-z0-9-]*$/.test(name)) throw new Error("project names are kebab-case");
         const abs = path.resolve(str(p) ?? p);
         if (!existsSync(path.join(abs, ".git"))) throw new Error(`${abs} is not a git checkout`);
         const prev = g.projects[name];
         g.projects[name] = {
+          ...prev,
           path: abs,
           base: str(flags.base) ?? prev?.base ?? "main",
           push: flags.push ? true : prev?.push ?? false,
-          ...(str(flags["agents-dir"]) ? { agentsDir: str(flags["agents-dir"]) } : prev?.agentsDir ? { agentsDir: prev.agentsDir } : {}),
-          ...(str(flags.link) ? { link: str(flags.link)!.split(",").filter(Boolean) } : prev?.link ? { link: prev.link } : {}),
-          ...(str(flags.setup) ? { setup: str(flags.setup) } : prev?.setup ? { setup: prev.setup } : {}),
+          ...(str(flags["agents-dir"]) ? { agentsDir: str(flags["agents-dir"]) } : {}),
+          ...(str(flags.link) ? { link: str(flags.link)!.split(",").filter(Boolean) } : {}),
+          ...(str(flags.setup) ? { setup: str(flags.setup) } : {}),
+          ...(str(flags.goal) ? { goal: str(flags.goal) } : {}),
+          ...(prev ? {} : { created: new Date().toISOString() }),
         };
         if (flags.default || !g.defaultProject) g.defaultProject = name;
         console.log(`saved ${saveGlobalConfig(g)}`);
         console.log(`${name}: ${abs} (base ${g.projects[name].base}${g.projects[name].push ? ", push" : ""}); stack: ${repoStack(abs)}`);
-        if (!existsSync(path.join(abs, "agentpipe.json"))) console.log(`note: no agentpipe.json in the repo; the pipeline will use defaults (bun run lint / bun run test:unit). Copy agentpipe.example.json and adjust the commands if this project differs.`);
+        if (!existsSync(path.join(abs, "agentpipe.json"))) console.log(`note: no agentpipe.json in the repo; the pipeline will use defaults (bun run lint / bun run test:unit). Copy agentpipe.example.json and adjust the commands if this project differs, or queue: agentpipe add --project ${name} --agent project-setup "Set up agentpipe"`);
         if (!existsSync(path.join(abs, "AGENTPIPE.md"))) console.log(`tip: an AGENTPIPE.md at the repo root is read by every agent: conventions, forbidden areas, how to run things.`);
+      } else if (sub === "create") {
+        const name = positional[0];
+        if (!name || !str(flags.goal)) throw new Error('usage: agentpipe projects create NAME --goal "what it is for" (--path DIR | --clone URL | --new [--github owner/name] | --branch-of PARENT [--branch B])');
+        const kind = flags["branch-of"] ? "branch" : flags.clone ? "clone" : flags.new ? "new" : "existing";
+        const spec = ProjectSpec.parse({
+          name,
+          goal: str(flags.goal) ?? "",
+          kind,
+          path: str(flags.path),
+          repo: str(flags.clone) ?? str(flags.github),
+          parent: str(flags["branch-of"]),
+          branch: str(flags.branch),
+          base: str(flags.base),
+          push: flags.push ? true : flags["no-push"] ? false : undefined,
+          setup: str(flags.setup),
+          link: str(flags.link)?.split(",").filter(Boolean),
+          kickoff: str(flags.kickoff),
+          make_current: Boolean(flags.use),
+        });
+        if (kind === "existing" && !spec.path) throw new Error("say where the project comes from: --path DIR (existing checkout), --clone URL, --new, or --branch-of PARENT");
+        // A human running this approves the GitHub steps by running it.
+        const created = await createProject(spec, { allowRemote: true });
+        for (const n of created.notes) console.log(n);
+        for (const t of queueStreamStart(new Store(), created, spec, process.env.USER ?? "cli")) console.log(`#${t.id} queued for ${t.agent} in ${created.name}: ${t.title}`);
+      } else if (sub === "new") {
+        const name = positional.shift();
+        const what = positional.join(" ").trim();
+        if (!name || !what) throw new Error('usage: agentpipe projects new NAME "what the stream is for, where it lives, what to do first"');
+        if (g.projects[name]) throw new Error(`project "${name}" already exists`);
+        const { name: home, project } = resolveProject(g, str(flags.project));
+        requireAgent(loadRegistry(project), "architect");
+        const t = new Store().add({
+          project: home,
+          agent: "architect",
+          title: `Create project ${name}`,
+          description: `Create and configure a new project (stream of work) named "${name}". Return it in "projects"; do not plan work for it as subtasks here.${flags.use ? " Make it the current project." : ""}\n\nThe human's description:\n${what}`,
+          priority: 10,
+          created_by: process.env.USER ?? "cli",
+        });
+        console.log(`#${t.id} queued for the architect (in ${home}): ${t.title}`);
+        console.log("It creates the project on disk; anything on GitHub waits for: agentpipe projects approve " + name);
+      } else if (["pause", "resume", "archive"].includes(sub)) {
+        const name = positional[0];
+        if (!name || !g.projects[name]) throw new Error(`usage: agentpipe projects ${sub} NAME (known: ${Object.keys(g.projects).join(", ")})`);
+        const status: ProjectStatus = sub === "pause" ? "paused" : sub === "archive" ? "archived" : "active";
+        updateGlobalConfig((c) => {
+          if (status === "active") delete c.projects[name].status;
+          else c.projects[name].status = status;
+          if (status === "archived" && c.defaultProject === name) c.defaultProject = Object.keys(c.projects).find((n) => n !== name && projectStatus(c.projects[n]) === "active") ?? null;
+        });
+        const after = loadGlobalConfig();
+        console.log(`${name}: ${status}${status === "archived" && g.defaultProject === name ? `; current project is now ${after.defaultProject ?? "(none)"}` : ""}`);
+        const open = new Store().openCount(name);
+        if (status !== "active" && open) console.log(`${open} open task(s) stay in the queue and wait; a running task finishes first`);
+      } else if (sub === "approve") {
+        const name = positional[0];
+        if (!name) throw new Error("usage: agentpipe projects approve NAME");
+        for (const line of await approvePending(name)) console.log(line);
+      } else if (sub === "finish") {
+        const name = positional[0];
+        if (!name) throw new Error("usage: agentpipe projects finish NAME");
+        console.log(await finishStream(name));
+        console.log(`after it is merged: agentpipe projects archive ${name}`);
       } else if (sub === "remove") {
         const name = positional[0];
         if (!name || !g.projects[name]) throw new Error(`usage: agentpipe projects remove NAME (known: ${Object.keys(g.projects).join(", ")})`);
         delete g.projects[name];
         if (g.defaultProject === name) g.defaultProject = Object.keys(g.projects)[0] ?? null;
         console.log(`removed ${name} from ${saveGlobalConfig(g)} (its tasks stay in the queue history)`);
-      } else throw new Error("usage: agentpipe projects [list|add NAME PATH|remove NAME]");
+      } else throw new Error("usage: agentpipe projects [list|new|create|add|pause|resume|archive|approve|finish|remove] ...");
       break;
     }
 

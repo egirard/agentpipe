@@ -25,6 +25,27 @@ describe("architect", () => {
     const p3 = await verify(fakeContext({ result: good, files: { "src/x.ts": "oops" } }));
     expect(p3.join(" ")).toContain("not allowed");
   });
+  test("accepts a new stream instead of subtasks, rejects malformed ones", async () => {
+    const stream = { name: "dungeon-editor", goal: "A level editor for Ashardalon dungeon tiles, as its own stream.", kind: "branch" as const, parent: "ashardalon" };
+    expect(await verify(fakeContext({ result: { ...good, subtasks: [], projects: [stream] } }))).toEqual([]);
+    const p = await verify(fakeContext({ result: { ...good, subtasks: [], projects: [{ ...stream, parent: undefined }, { ...stream, name: "c", kind: "clone" as const, parent: undefined }] } }));
+    expect(p.join(" ")).toContain('needs "parent"');
+    expect(p.join(" ")).toContain('needs "repo"');
+  });
+  test("accepts agent proposals with a reason, rejects existing names and subtasks for proposed agents", async () => {
+    const proposal = { name: "db-migrator", description: "Writes and checks SQL migrations for the project's Postgres schema.", runtime: "claude" as const, why: "The goal needs a schema migration and no registered agent may touch SQL.", inputs: "", outputs: "", commits: true, shell: ["checks"] };
+    expect(await verify(fakeContext({ result: { ...good, agent_proposals: [proposal] } }))).toEqual([]);
+    const p1 = await verify(fakeContext({ result: { ...good, agent_proposals: [{ ...proposal, name: "coder" }] } }));
+    expect(p1.join(" ")).toContain("already exists");
+    const p2 = await verify(fakeContext({ result: { ...good, agent_proposals: [proposal], subtasks: [...good.subtasks, { title: "Write the migration", description: "Add a migration creating the heroes table with id, name, hp columns and a rollback; run the migration test in test/db.test.ts and keep it green.", agent: "db-migrator", acceptance: ["test/db.test.ts passes"] }] } }));
+    expect(p2.join(" ")).toContain("does not exist yet");
+    const p3 = await verify(fakeContext({ result: { ...good, status: "attention", subtasks: [], agent_proposals: [{ ...proposal, why: "needed" }] } }));
+    expect(p3.join(" ")).toContain("does not say why");
+  });
+  test("a cancelled goal plans nothing", async () => {
+    expect(await verify(fakeContext({ result: { ...good, status: "cancelled", subtasks: [] } }))).toEqual([]);
+    expect((await verify(fakeContext({ result: { ...good, status: "cancelled" } }))).join(" ")).toContain("plans nothing");
+  });
   test.skipIf(!process.env.AGENTPIPE_E2E)("plans a small goal into subtasks", async () => {
     const r = await runAgentE2E("architect", "Add a clamp(value, min, max) helper to src/utils.ts with unit tests, then document it in README.md.");
     expect(r.task.status).toBe("waiting");

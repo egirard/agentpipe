@@ -2,9 +2,10 @@ import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
 import { READ_ONLY_TOOLS, jsonSchemaOf, runClaude, tryParseJson } from "./claude.ts";
-import type { Config } from "./config.ts";
+import { loadConfig, type Config } from "./config.ts";
 import type { GlobalConfig, ProjectConfig } from "./global.ts";
 import { ollamaJson, type OllamaMessage } from "./ollama.ts";
+import { describeStream, renderProjects } from "./projects.ts";
 import { runPipeline } from "./pipeline.ts";
 import { delegateTargets, renderCatalog, type AgentManifest, type Registry } from "./registry.ts";
 import { commitAll, createBranch, createPullRequest, diffSince, fileExists, headSha, projectNotes, pushBranch, readFile, repoOverview, repoStack, runsRoot } from "./repo.ts";
@@ -45,20 +46,47 @@ export interface AgentRunContext {
   startBranch: string;
 }
 
-function schemaWithAgents(names: string[]) {
+function schemaWithAgents(manifest: Pick<AgentManifest, "can_delegate" | "can_create_projects">, names: string[]) {
   const sub = Subtask.extend({ agent: names.length ? z.enum(names as [string, ...string[]]) : z.string() });
-  return jsonSchemaOf(AgentResult.extend({ subtasks: z.array(sub).default([]) }));
+  let schema: z.ZodObject<any> = AgentResult.extend({ subtasks: z.array(sub).default([]) });
+  if (!manifest.can_create_projects) schema = schema.omit({ projects: true });
+  if (!manifest.can_delegate) schema = schema.omit({ agent_proposals: true });
+  return jsonSchemaOf(schema);
 }
 
 function projectCommands(cfg: Config): string[] {
   return [cfg.commands.lint, cfg.commands.unit].filter(Boolean);
 }
 
+/**
+ * What happened the last time this task ran and what the human said since. A task that stopped in
+ * attention (a question), failed or cancelled comes back through `agentpipe reply` or the status
+ * page; the agent that runs it next has no memory, so the previous report and the replies are put
+ * in front of it. Empty for a first run with no replies.
+ */
+export function renderContinuation(task: Task, store: Pick<Store, "replies">): string {
+  const replies = store.replies(task.id);
+  const previous = task.attempts > 1 && task.summary ? task.summary : null;
+  if (!replies.length && !previous) return "";
+  const lines = ["# Continuing a task that stopped"];
+  if (previous) lines.push("An earlier run of this task ended with this report:", "", clip(previous, 6000), "");
+  if (task.branch) lines.push(`Its branch, if it made one: ${task.branch}. You start from a fresh checkout; inspect that branch with git if you need what it did.`, "");
+  if (replies.length) {
+    lines.push("## The human's replies", "Answers and instructions from the person who owns this work. Act on them; they outrank the previous report.");
+    for (const r of replies) lines.push(`- (${r.ts.slice(0, 16).replace("T", " ")}, ${r.author}) ${r.text}`);
+    lines.push("");
+  }
+  lines.push("Continue from where the previous run stopped. Do not ask a question that has been answered above.");
+  return lines.join("\n");
+}
+
 /** Everything a prompt says about the task itself, shared by the claude and ollama runtimes. */
 function renderTask(task: Task, ctx: AgentRunContext, manifest: AgentManifest, diff: string): string {
   const lines = [`# Task #${task.id}: ${task.title}`, task.description];
   if (task.acceptance.length) lines.push("", "## Acceptance criteria (what done means for this task)", ...task.acceptance.map((a) => `- ${a}`));
-  lines.push("", `# Project`, `${ctx.projectName} at ${ctx.project.path}; base branch ${ctx.project.base}; you are working on ${ctx.startBranch}${task.branch && task.branch !== ctx.startBranch ? ` (task branch ${task.branch})` : ""}.`, `Stack: ${repoStack(ctx.cfg.repo)}.`);
+  const continuation = renderContinuation(task, ctx.store);
+  if (continuation) lines.push("", continuation);
+  lines.push("", `# Project`, `${describeStream(ctx.projectName, ctx.project)}`, `You are working on ${ctx.startBranch}${task.branch && task.branch !== ctx.startBranch ? ` (task branch ${task.branch})` : ""}.`, `Stack: ${repoStack(ctx.cfg.repo)}.`);
   const notes = projectNotes(ctx.cfg.repo);
   if (notes) lines.push("", "## Project notes for agents (AGENTPIPE.md)", notes);
   if (task.parent_id) {
@@ -115,10 +143,12 @@ async function buildPrompt(task: Task, ctx: AgentRunContext, manifest: AgentMani
   const parts: string[] = [renderTask(task, ctx, manifest, diff)];
   if (manifest.context.includes("repo-overview")) parts.push("# Repository overview (directories, file counts)\n" + (await repoOverview(ctx.cfg.repo)));
   if (manifest.context.includes("queue")) parts.push("# Current queue for this project\n" + renderQueue(ctx));
+  if (manifest.context.includes("projects")) parts.push("# Projects (streams of work) on this machine\n" + renderProjects(ctx.gcfg, ctx.store));
   if (manifest.context.includes("catalog") && manifest.can_delegate) {
     parts.push("# Agents you may delegate to (registry)\n" + catalogFor(ctx, manifest.name));
     parts.push(DELEGATION_RULES);
   }
+  if (manifest.can_delegate) parts.push(PROPOSAL_RULES);
   parts.push(RESULT_RULES);
   return parts.join("\n\n");
 }
@@ -132,8 +162,11 @@ const DELEGATION_RULES = `# How delegation works
 - Commands outside an agent's shell groups are refused. Work that needs other commands (installs, builds, scripted checks) goes to the shell-runner agent as its own subtask, with the exact command and why.
 - When every subtask has finished, the architect is woken to review the outcomes under this task; you do not need to schedule that.`;
 
+const PROPOSAL_RULES = `# Agents that do not exist yet
+Delegate only to registered agents; a subtask naming any other agent is dropped. When part of the work needs a skill no registered agent has (a tool, a language, an external system, a kind of check), do not improvise: describe the missing agent in "agent_proposals" (name, runtime, what it would do, why this work needs it), plan everything else, and say in the summary what is left undone until that agent exists. A human creates agents; if the whole assignment depends on one, return attention so they can create it and reply.`;
+
 const RESULT_RULES = `# Your answer
-Reply with the JSON object described by the schema. "status" is done when you completed your assignment (creating subtasks counts as completing a planning assignment), attention when a human needs to look at something before work can continue, failed when you could not do it. Put the report a human should read in "summary".`;
+Reply with the JSON object described by the schema. "status" is done when you completed your assignment (creating subtasks counts as completing a planning assignment); attention when a human must decide or answer something before work can continue (say exactly what near the top of the summary; their reply reaches you on the next run); failed when you tried and could not (an error, a broken environment: a retry or a better specification might work); cancelled when the task cannot be done as specified and no retry would help (impossible, moot, contradicts the codebase: say why and what would make it possible). Put the report a human should read in "summary".`;
 
 /** Appended to every model agent's system prompt. Code enforces most of it; this makes the model cooperate rather than fight the gates. */
 export const SAFETY_FOOTER = `
@@ -162,7 +195,7 @@ async function claudeRuntime(task: Task, ctx: AgentRunContext, manifest: AgentMa
     allowedTools: [...tools],
     permissionMode: manifest.commits ? "acceptEdits" : "dontAsk",
     maxTurns: manifest.max_turns,
-    jsonSchema: schemaWithAgents(names),
+    jsonSchema: schemaWithAgents(manifest, names),
     timeoutSec: manifest.timeout_sec,
     model: manifest.model || undefined,
     settings: hookSettings(groups, cmds),
@@ -171,7 +204,11 @@ async function claudeRuntime(task: Task, ctx: AgentRunContext, manifest: AgentMa
   const raw = run.structured ?? tryParseJson(run.result);
   if (!raw) return { status: "attention", summary: `Agent returned no structured result. Raw reply:\n\n${clip(run.result, 6000)}`, findings: [], subtasks: [] };
   const res = AgentResult.parse(raw);
-  if (!manifest.can_delegate) res.subtasks = [];
+  if (!manifest.can_delegate) {
+    res.subtasks = [];
+    delete res.agent_proposals;
+  }
+  if (!manifest.can_create_projects) delete res.projects;
   return res;
 }
 
@@ -181,14 +218,16 @@ async function ollamaRuntime(task: Task, ctx: AgentRunContext, manifest: AgentMa
     { role: "system", content: manifest.prompt + SAFETY_FOOTER },
     { role: "user", content: clip(prompt, ctx.cfg.numCtx * 3) },
   ];
-  const schema = jsonSchemaOf(AgentResult) as Record<string, unknown>;
+  const schema = jsonSchemaOf(AgentResult.omit({ projects: true, agent_proposals: true, subtasks: true })) as Record<string, unknown>;
   const res = await ollamaJson(messages, { url: ctx.cfg.ollamaUrl, model: manifest.model || ctx.cfg.models.reviewer, numCtx: ctx.cfg.numCtx, schema, label: `${manifest.name} #${task.id}` }, (v) => AgentResult.parse(v));
   res.subtasks = [];
+  delete res.agent_proposals;
   return res;
 }
 
-export function taskEnv(task: Task, ctx: Pick<AgentRunContext, "cfg" | "projectName" | "project">): Record<string, string> {
+export function taskEnv(task: Task, ctx: Pick<AgentRunContext, "cfg" | "projectName" | "project"> & Partial<Pick<AgentRunContext, "store">>): Record<string, string> {
   return {
+    AGENTPIPE_TASK_REPLIES: ctx.store ? ctx.store.replies(task.id).map((r) => r.text).join("\n---\n") : "",
     AGENTPIPE_REPO: ctx.cfg.repo,
     AGENTPIPE_PROJECT: ctx.projectName,
     AGENTPIPE_TASK_ID: String(task.id),
@@ -222,6 +261,7 @@ async function pipelineRuntime(task: Task, ctx: AgentRunContext, manifest: Agent
     manifest.task_prefix,
     `${task.title}\n\n${task.description}`,
     task.acceptance.length ? `Acceptance criteria:\n${task.acceptance.map((a) => "- " + a).join("\n")}` : "",
+    renderContinuation(task, ctx.store),
     task.files.length ? `Files most likely involved: ${task.files.join(", ")}` : "",
     `Project stack: ${repoStack(ctx.cfg.repo)}.`,
     notes ? `Project notes for agents (AGENTPIPE.md):\n${clip(notes, 3000)}` : "",
@@ -336,6 +376,16 @@ export async function runAgent(task: Task, manifest: AgentManifest, ctx: AgentRu
       await sh(`git checkout -q --detach && git branch -D ${JSON.stringify(branch)}`, ctx.cfg.repo, 60);
       branch = null;
     } else {
+      // An agent that wrote agentpipe.json (project-setup) is checked with the commands it wrote.
+      if (verification.ok && changedFiles.includes("agentpipe.json")) {
+        try {
+          ctx.cfg = loadConfig(ctx.cfg.repo, { push: ctx.project.push });
+        } catch (e) {
+          verification.ok = false;
+          verification.problems.push(`agentpipe.json does not load: ${(e as Error).message}`);
+          if (result.status === "done") result.status = "attention";
+        }
+      }
       const checks = verification.ok ? await runFastChecks(ctx.cfg) : [];
       const green = checks.length > 0 && checks.every((c) => c.ok);
       if (!verification.ok) {

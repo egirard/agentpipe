@@ -1,11 +1,13 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { recordProposals } from "./actions.ts";
 import { loadConfig } from "./config.ts";
-import { dataDir, worktreeRoot, type GlobalConfig, type ProjectConfig } from "./global.ts";
+import { currentProject, dataDir, isRunnable, loadGlobalConfig, worktreeRoot, type GlobalConfig, type ProjectConfig } from "./global.ts";
 import { notify } from "./notify.ts";
+import { createProject, queueStreamStart } from "./projects.ts";
 import { loadRegistry, type AgentManifest, type Registry } from "./registry.ts";
 import { ensureIgnored, excludeAgentpipeDir } from "./repo.ts";
-import type { Subtask } from "./result.ts";
+import type { ProjectSpec, Subtask } from "./result.ts";
 import { runAgent, type AgentRunContext, type RunOutcome } from "./runner.ts";
 import { TERMINAL_STATUSES, type Store, type Task } from "./store.ts";
 import { BudgetExceeded, clip, log, setLogFile, sh, withRunContext } from "./util.ts";
@@ -15,6 +17,10 @@ import { BudgetExceeded, clip, log, setLogFile, sh, withRunContext } from "./uti
  * `gpu` slot (pipeline and ollama agents share the one GPU) and one `cloud` slot (claude and
  * shell agents). Every task gets a private git worktree of its project, so tasks from any
  * projects run side by side without touching each other or the human's checkout.
+ *
+ * Projects: the config is re-read before every claim, so projects added, switched, paused or
+ * approved while the worker runs take effect at once. Only runnable projects (active, nothing
+ * held for approval) are claimed from, and the current project's tasks go first.
  *
  * Budgets: a task whose Claude spend reaches budgets.taskUsd has its next cloud call refused
  * (the task ends in attention). When the day's spend reaches budgets.dailyUsd, lanes stop
@@ -96,11 +102,23 @@ export async function runWorker(store: Store, gcfg: GlobalConfig, opts: WorkerOp
 
     let budgetNotified = "";
     let claimedOnce = false;
+    let cfgError = "";
+    const fresh = (): GlobalConfig => {
+      try {
+        gcfg = loadGlobalConfig();
+        cfgError = "";
+      } catch (e) {
+        // Mid-edit or broken: keep working with the last good config, say so once.
+        if (cfgError !== (e as Error).message) log(`worker: config unreadable, keeping the previous one: ${(cfgError = (e as Error).message)}`);
+      }
+      return gcfg;
+    };
     const slot = async (lane: string, index: number) => {
       const label = `${lane}${index}`;
       while (!stopping) {
         if (opts.once && claimedOnce) return;
-        const agents = laneAgents(gcfg, lane);
+        const g = fresh();
+        const agents = laneAgents(g, lane);
         const overBudget = gcfg.budgets.dailyUsd > 0 && store.spendToday() >= gcfg.budgets.dailyUsd;
         if (overBudget) {
           const today = new Date().toISOString().slice(0, 10);
@@ -110,7 +128,8 @@ export async function runWorker(store: Store, gcfg: GlobalConfig, opts: WorkerOp
             await notify(gcfg, { kind: "budget", title: "agentpipe: daily budget reached", body: `Claude spend today is $${store.spendToday().toFixed(2)} of $${gcfg.budgets.dailyUsd}. Cloud tasks wait until the next UTC day.` });
           }
         }
-        const task = store.claimNext({ project: opts.project, agents: overBudget ? agents.free : agents.all, lane });
+        const runnable = Object.entries(g.projects).filter(([, p]) => isRunnable(p)).map(([n]) => n);
+        const task = store.claimNext({ project: opts.project, projects: runnable, prefer: currentProject(g), agents: overBudget ? agents.free : agents.all, lane });
         if (!task) {
           if (opts.once) return;
           await sleep(gcfg.worker.pollSec * 1000);
@@ -124,7 +143,7 @@ export async function runWorker(store: Store, gcfg: GlobalConfig, opts: WorkerOp
             budgetUsd: gcfg.budgets.taskUsd > 0 ? gcfg.budgets.taskUsd : null,
             onSpend: (usd, l, model, turns, seconds) => store.addUsage({ task_id: task.id, project: task.project, agent: task.agent, label: l, model, cost_usd: usd, turns, seconds }),
           },
-          () => processTask(store, gcfg, task),
+          () => processTask(store, g, task),
         );
         if (opts.once) return;
       }
@@ -181,7 +200,46 @@ async function processTask(store: Store, gcfg: GlobalConfig, task: Task) {
   }
   setLogFile(path.join(dataDir(), "worker.log"));
   await cleanupWorktree(gcfg, project, wt);
+  if (outcome?.result.projects?.length && (await createProposedProjects(store, task, outcome.result.projects, outcome)) && outcome.result.subtasks.length) {
+    // With subtasks the task goes to waiting, not attention, so finish() would not tell anyone.
+    void notify(gcfg, { kind: "attention", title: `agentpipe: #${task.id} created a project that needs you`, body: `${task.title}\n\nagentpipe show ${task.id}` });
+  }
   finish(store, gcfg, task, outcome, error, registry);
+}
+
+/**
+ * New streams an agent proposed. Only a clean result creates anything: the task must be done and
+ * verified. Each stream gets its first tasks (setup, kickoff); a stream held for approval, or one
+ * that could not be created, turns the task into attention so the human hears about it.
+ * Returns whether the human is needed.
+ */
+export async function createProposedProjects(store: Store, task: Task, specs: ProjectSpec[], outcome: Pick<RunOutcome, "result" | "verification">): Promise<boolean> {
+  const { result } = outcome;
+  if (result.status !== "done" || !outcome.verification.ok) {
+    result.summary += `\n\n## Projects not created\nThe task did not finish cleanly, so the proposed project(s) ${specs.map((p) => p.name).join(", ")} were not created.`;
+    return false;
+  }
+  const lines: string[] = [];
+  let needsHuman = false;
+  for (const spec of specs) {
+    try {
+      const created = await createProject(spec, { allowRemote: false });
+      const first = queueStreamStart(store, created, spec, `agent:${task.agent}#${task.id}`);
+      lines.push(`### ${created.name}`, ...created.notes.map((n) => `- ${n}`), ...first.map((t) => `- queued #${t.id} [${t.agent}] ${t.title}${created.pending.length ? " (runs after approval)" : ""}`));
+      store.event(task.id, "project", `created project ${created.name} at ${created.project.path}${created.pending.length ? `, held for approval: ${created.pending.map((p) => p.command).join("; ")}` : ""}`);
+      if (created.pending.length) {
+        needsHuman = true;
+        lines.push(`- **Needs you:** approve the GitHub step(s) with \`agentpipe projects approve ${created.name}\`: ${created.pending.map((p) => `\`${p.command}\` (${p.why})`).join("; ")}`);
+      }
+    } catch (e) {
+      needsHuman = true;
+      lines.push(`### ${spec.name}`, `- **not created:** ${(e as Error).message}`);
+      store.event(task.id, "warning", `project ${spec.name} not created: ${(e as Error).message}`);
+    }
+  }
+  result.summary += `\n\n## Projects\n${lines.join("\n")}`;
+  if (needsHuman) result.status = "attention";
+  return needsHuman;
 }
 
 interface Worktree {
@@ -300,6 +358,9 @@ function finish(store: Store, gcfg: GlobalConfig, task: Task, outcome: RunOutcom
   } else {
     const { result } = outcome;
     const created = createSubtasks(store, gcfg, task, result.subtasks, registry);
+    // Agents the agent wished it had: recorded for the human, never created here.
+    const proposed = recordProposals(store, result.agent_proposals, { task, project: task.project, by: `agent:${task.agent}#${task.id}` });
+    if (proposed.length) result.summary += `\n\n## Agents proposed\n${proposed.join("\n")}`;
     status = created.length ? "waiting" : result.status;
     store.update(task.id, {
       summary: clip(result.summary, 30_000),
@@ -307,7 +368,8 @@ function finish(store: Store, gcfg: GlobalConfig, task: Task, outcome: RunOutcom
       branch: outcome.branch ?? task.branch,
       base_branch: outcome.baseBranch,
       pr_url: outcome.prUrl,
-      error: result.status === "failed" ? clip(result.summary, 500) : null,
+      // failed: the report is the error. cancelled: the first lines say why it was impossible.
+      error: result.status === "failed" || result.status === "cancelled" ? clip(result.summary.replace(/^#+\s.*$/m, "").trim(), 500) : null,
     });
     const blockers = result.findings.filter((f) => f.severity === "blocker").length;
     store.setStatus(task.id, status as any, `agent reported ${result.status}${outcome.verification.ran ? (outcome.verification.ok ? ", verification passed" : `, verification FAILED (${outcome.verification.problems.length})`) : ""}${blockers ? `, ${blockers} blocker finding(s)` : ""}${created.length ? `, created ${created.length} subtask(s)` : ""}${outcome.prUrl ? `, PR ${outcome.prUrl}` : outcome.branch ? `, branch ${outcome.branch}` : ""}`);
@@ -316,7 +378,7 @@ function finish(store: Store, gcfg: GlobalConfig, task: Task, outcome: RunOutcom
   const t = store.get(task.id)!;
   log(`worker: #${task.id} -> ${t.status}${t.pr_url ? ` (${t.pr_url})` : ""}${t.cost_usd ? ` $${t.cost_usd.toFixed(2)}` : ""}`);
 
-  if (t.status === "attention" || t.status === "failed") {
+  if (t.status === "attention" || t.status === "failed" || t.status === "cancelled") {
     void notify(gcfg, {
       kind: t.status,
       title: `agentpipe: #${t.id} ${t.status} [${t.agent}] ${t.title}`,

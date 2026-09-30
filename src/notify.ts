@@ -7,7 +7,7 @@ import { log, sh } from "./util.ts";
  * accept the body as posted) and/or a shell command. Both are off until configured in
  * ~/.config/agentpipe/agentpipe.json under "notifications". Failures are logged, never thrown.
  */
-export type NotifyKind = "attention" | "failed" | "digest" | "budget" | "agent-health" | "worker";
+export type NotifyKind = "attention" | "failed" | "cancelled" | "digest" | "budget" | "agent-health" | "worker";
 
 export interface Notification {
   kind: NotifyKind;

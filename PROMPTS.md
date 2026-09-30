@@ -71,3 +71,33 @@ Record all prompts I give you for this project in PROMPTS.md for later reference
 Please push this repository into github.  I don't think we've pushed it yet, so we might need to create a new private project to track this work.
 
 `Outcome: initialised git, created private repo https://github.com/egirard/agentpipe, pushed main; mothership copy now tracks the same history.`
+
+## 13. 2026-09-29
+
+I'd like to add support for "projects" into mothership's system, allowing us to work on and track progress on  multiple streams.  So for example, the "ashardalon" stream is currently active, but I would like to be able to switch to a different stream.  I'll name these streams and ask the architext to create and configure new streams.  Commands will default to the current project/stream.  These will typically correspond to a directory on device and a repository on github, but might also be a git branch.
+
+`Outcome: current project with agentpipe use, pause/resume/archive, branch streams, architect-created streams (GitHub steps held for projects approve), project-setup agent; tests green, left uncommitted.`
+
+## 14. 2026-09-29
+
+Please add an apache license to this project and make the github repository public.
+
+`Outcome: added Apache-2.0 LICENSE, NOTICE, package.json license and README section (commit 8b9e2fc, pushed); scanned history for secrets, then made egirard/agentpipe public.`
+
+## 15. 2026-09-29
+
+I want to introduce a lightweight prompting so that I can ask unimportant questions (what port is the server on, for example) without cluttering up prompt.md. When I want to give a lightweight prompt, I will prefix it with "OTR: ", and you will not add it to prompts.md and not add the summary result.
+
+`Outcome: saved the PROMPTS.md logging rule with the OTR exception as a persistent memory; backfilled prompts 13-15.`
+
+## 16. 2026-09-29
+
+ Let's expand the mothership status page to better support projects and command queues.  (1) Add an "add" command button for the queue, which will effectively provide a way to initiate an "agentpipt add" to the architect.  (2) Provide a way to review "attention" tags to open up the details of the attention feedback, and allow the user response to be appended to the given agent's context so that it can continue.  Note that we don't currently have a command line interface to add a response to a given task, so this might require additional infrastructure as well as a command line interface. (3) Expand the architect to suggest potential agents that could be created in order to enable activities that are currently impossible to complete. (4) We probably need to add a "cancelled" status for tasks that proved to be impossible.
+
+`Outcome: status page gained an Add task form, reply/retry/cancel on task details (POST API, same-origin JSON), agent proposals section; agentpipe reply + replies table, continuation context for rerun agents; cancelled is a first-class agent status; architect proposes missing agents. 84 tests green, left uncommitted.`
+
+## 17. 2026-09-30
+
+I want to introduce a lightweight prompting so that I can ask unimportant questions (what port is the server on, for example) without cluttering up prompt.md. When I want to give a lightweight prompt, I will prefix it with "OTR: ", and you will not add it to prompts.md and not add the summary result.
+
+`Outcome: already in effect since prompt 15 (persistent memory); confirmed, nothing to change.`

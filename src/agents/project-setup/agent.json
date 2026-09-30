@@ -1,0 +1,26 @@
+{
+  "name": "project-setup",
+  "description": "Prepares a repository for agentpipe: writes agentpipe.json (the lint and unit test commands that work here) and AGENTPIPE.md (guidance every agent reads). Queued automatically for new projects.",
+  "runtime": "claude",
+  "when_to_use": "Once per new project whose repository has no agentpipe.json, or when a project's commands or conventions changed so much that the file and notes are wrong. Not for code changes.",
+  "inputs": "What the project is for; anything known about its toolchain.",
+  "outputs": "A branch with agentpipe.json and AGENTPIPE.md at the repository root, checked by running the commands it wrote.",
+  "can_delegate": false,
+  "commits": true,
+  "context": [
+    "repo-overview",
+    "files"
+  ],
+  "max_turns": 30,
+  "tags": [
+    "setup"
+  ],
+  "shell": [
+    "git-read",
+    "package-read"
+  ],
+  "paths": [
+    "agentpipe.json",
+    "AGENTPIPE.md"
+  ]
+}

@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 
@@ -10,7 +10,24 @@ import path from "node:path";
  * Several projects (repositories in different directories) are served by one queue and one
  * worker. Each task names its project; the worker checks out the right repository per task in a
  * private worktree, so projects and tasks never interfere.
+ *
+ * A project is a stream of work: a directory with its own repository, or a long-lived branch of
+ * another project's repository (`parent` set, `base` = the stream branch, so task pull requests
+ * land on the stream branch and the stream merges into the parent's base when it is finished).
+ * One project is current (`defaultProject`): commands default to it and the worker takes its
+ * tasks first. Paused and archived projects keep their tasks but nothing of theirs runs.
  */
+export const PROJECT_STATUSES = ["active", "paused", "archived"] as const;
+export type ProjectStatus = (typeof PROJECT_STATUSES)[number];
+
+/** A step outside this machine (a GitHub repo to create, a branch to push) that waits for the human. */
+export interface PendingStep {
+  command: string;
+  /** Directory the command runs in. */
+  cwd: string;
+  why: string;
+}
+
 export interface ProjectConfig {
   /** Absolute path of the main checkout. The worker never edits it; it makes worktrees next to it. */
   path: string;
@@ -24,6 +41,18 @@ export interface ProjectConfig {
   link?: string[];
   /** Command run once in a fresh worktree before the first task uses it (e.g. "bun install"). */
   setup?: string;
+  /** active (default), paused (tasks wait), archived (hidden, nothing runs, no new tasks). */
+  status?: ProjectStatus;
+  /** What this stream is for, in a sentence or two. Every agent working in it reads this. */
+  goal?: string;
+  /** GitHub repository (owner/name or URL), when there is one. */
+  repo?: string;
+  /** Branch stream: the project whose repository and base branch this one forked from. */
+  parent?: string;
+  /** ISO timestamp of creation. */
+  created?: string;
+  /** Remote steps waiting for `agentpipe projects approve`; the project does not run until they are done. */
+  pending?: PendingStep[];
 }
 
 export interface GlobalConfig {
@@ -84,7 +113,7 @@ export const GLOBAL_DEFAULTS: GlobalConfig = {
   worktrees: { root: "", link: ["node_modules"], cleanup: true },
   architect: { maxRounds: 4, maxOpenTasks: 300, maxItemsPerReview: 12, maxSubtasks: 30, model: "" },
   budgets: { taskUsd: 5, dailyUsd: 40, agentAttentionRate: 0.5, agentWindow: 10 },
-  notifications: { webhook: "", command: "", events: ["attention", "failed", "digest", "budget", "agent-health", "worker"] },
+  notifications: { webhook: "", command: "", events: ["attention", "failed", "cancelled", "digest", "budget", "agent-health", "worker"] },
 };
 
 export function configDir(): string {
@@ -132,6 +161,12 @@ export function loadGlobalConfig(): GlobalConfig {
       ...(pr.agentsDir ? { agentsDir: pr.agentsDir } : {}),
       ...(pr.link ? { link: pr.link } : {}),
       ...(pr.setup ? { setup: pr.setup } : {}),
+      ...(pr.status && pr.status !== "active" ? { status: pr.status } : {}),
+      ...(pr.goal ? { goal: pr.goal } : {}),
+      ...(pr.repo ? { repo: pr.repo } : {}),
+      ...(pr.parent ? { parent: pr.parent } : {}),
+      ...(pr.created ? { created: pr.created } : {}),
+      ...(pr.pending?.length ? { pending: pr.pending } : {}),
     };
   }
   if (!cfg.defaultProject && Object.keys(cfg.projects).length === 1) cfg.defaultProject = Object.keys(cfg.projects)[0];
@@ -141,22 +176,71 @@ export function loadGlobalConfig(): GlobalConfig {
 export function saveGlobalConfig(cfg: GlobalConfig): string {
   const p = globalConfigPath();
   mkdirSync(path.dirname(p), { recursive: true });
-  writeFileSync(p, JSON.stringify(cfg, null, 2) + "\n");
+  // Written by the CLI, the worker (projects the architect creates) and the tests; never leave half a file.
+  const tmp = `${p}.${process.pid}.tmp`;
+  writeFileSync(tmp, JSON.stringify(cfg, null, 2) + "\n");
+  renameSync(tmp, p);
   return p;
 }
 
-/** Resolve a project by name, or the project whose path contains `cwd`, or the default. */
+/** Load, change, save: for edits that must not overwrite what another process saved meanwhile. */
+export function updateGlobalConfig<T>(fn: (cfg: GlobalConfig) => T): T {
+  const cfg = loadGlobalConfig();
+  const out = fn(cfg);
+  saveGlobalConfig(cfg);
+  return out;
+}
+
+export function projectStatus(p: ProjectConfig): ProjectStatus {
+  return p.status ?? "active";
+}
+
+/** Whether the worker may run this project's tasks: active and no remote step waiting for approval. */
+export function isRunnable(p: ProjectConfig): boolean {
+  return projectStatus(p) === "active" && !p.pending?.length;
+}
+
+/** The current project's name, if one is set and still exists. */
+export function currentProject(cfg: GlobalConfig): string | null {
+  return cfg.defaultProject && cfg.projects[cfg.defaultProject] ? cfg.defaultProject : null;
+}
+
+function contains(dir: string, cwd: string): boolean {
+  const rel = path.relative(dir, path.resolve(cwd));
+  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+}
+
+function checkedOutBranch(cwd: string): string | null {
+  const r = Bun.spawnSync(["git", "rev-parse", "--abbrev-ref", "HEAD"], { cwd, stdout: "pipe", stderr: "ignore" });
+  return r.exitCode === 0 ? r.stdout.toString().trim() : null;
+}
+
+/**
+ * Which project a command means: the one named (by flag, then AGENTPIPE_PROJECT), else the one
+ * whose checkout contains `cwd`, else the current project. Branch streams share their parent's
+ * directory; among several projects at `cwd` the current one wins, then the one whose base branch
+ * is checked out there, then the one that is not a branch stream.
+ */
 export function resolveProject(cfg: GlobalConfig, name: string | undefined, cwd = process.cwd()): { name: string; project: ProjectConfig } {
+  name ??= process.env.AGENTPIPE_PROJECT || undefined;
   if (name) {
     const project = cfg.projects[name];
     if (!project) throw new Error(`unknown project "${name}"; known: ${Object.keys(cfg.projects).join(", ") || "(none; run: agentpipe projects add NAME PATH)"}`);
     return { name, project };
   }
-  for (const [n, p] of Object.entries(cfg.projects)) {
-    const rel = path.relative(p.path, path.resolve(cwd));
-    if (rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel))) return { name: n, project: p };
+  const here = Object.entries(cfg.projects).filter(([, p]) => projectStatus(p) !== "archived" && contains(p.path, cwd));
+  if (here.length) {
+    const current = currentProject(cfg);
+    let pick = here.find(([n]) => n === current);
+    if (!pick && here.length > 1) {
+      const branch = checkedOutBranch(cwd);
+      pick = here.find(([, p]) => p.base === branch) ?? here.find(([, p]) => !p.parent);
+    }
+    const [n, p] = pick ?? here[0];
+    return { name: n, project: p };
   }
-  if (cfg.defaultProject && cfg.projects[cfg.defaultProject]) return { name: cfg.defaultProject, project: cfg.projects[cfg.defaultProject] };
+  const current = currentProject(cfg);
+  if (current) return { name: current, project: cfg.projects[current] };
   throw new Error(`no project given and none configured for ${cwd}. Register one: agentpipe projects add NAME PATH [--base main] [--push]`);
 }
 
