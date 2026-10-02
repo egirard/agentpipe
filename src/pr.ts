@@ -4,6 +4,7 @@
  * decision on it, and what changed since the last look. Pure: the commands that produce the data
  * live elsewhere.
  */
+import { clip } from "./util.ts";
 
 export interface PrComment {
   author: string;
@@ -125,4 +126,25 @@ export function decisionComment(d: { decision: PrDecision; text: string; by: str
 /** True for a comment agentpipe itself posted. */
 export function isPipelineComment(body: string): boolean {
   return body.includes(DECISION_MARKER);
+}
+
+/** One short human-readable line per change since the last look, for a terminal or the status page. */
+export function prActivity(prev: PrSnapshot | null, next: PrSnapshot): string[] {
+  if (!prev) return [];
+  const out: string[] = [];
+  const seenComments = new Set(prev.comments.map((c) => `${c.author}\u0000${c.ts}`));
+  for (const c of next.comments) {
+    if (seenComments.has(`${c.author}\u0000${c.ts}`)) continue;
+    if (isPipelineComment(c.body)) continue;
+    out.push(`new comment from ${c.author}: ${clip(c.body, 200)}`);
+  }
+  const seenReviews = new Set(prev.reviews.map((r) => `${r.author}\u0000${r.ts}`));
+  for (const r of next.reviews) {
+    if (seenReviews.has(`${r.author}\u0000${r.ts}`)) continue;
+    out.push(`review by ${r.author}: ${r.state}` + (r.body ? `: ${clip(r.body, 200)}` : ""));
+  }
+  if (prev.state !== next.state && prev.state && next.state) out.push(`pull request state changed from ${prev.state} to ${next.state}`);
+  if (prev.reviewDecision !== next.reviewDecision && next.reviewDecision) out.push(`review decision is now ${next.reviewDecision}`);
+  if (next.checks.failed > 0 && next.checks.failed !== prev.checks.failed) out.push(`${next.checks.failed} of ${next.checks.total} checks failing`);
+  return out;
 }

@@ -1,6 +1,6 @@
 // src/pr.test.ts
 import { describe, expect, test } from "bun:test";
-import { parsePrUrl, snapshotFromJson, decisionComment, isPipelineComment } from "./pr.ts";
+import { decisionComment, isPipelineComment, parsePrUrl, prActivity, snapshotFromJson, type PrSnapshot } from "./pr.ts";
 
 describe("parsePrUrl", () => {
   test("reads owner, repo and number from a github pull request url", () => {
@@ -77,5 +77,44 @@ describe("decision comments", () => {
   test("a human comment is not a pipeline comment", () => {
     expect(isPipelineComment("looks good to me")).toBe(false);
     expect(isPipelineComment("")).toBe(false);
+  });
+});
+
+function snap(over: Partial<PrSnapshot> = {}): PrSnapshot {
+  return { url: "https://github.com/egirard/agentpipe/pull/42", state: "OPEN", isDraft: false, reviewDecision: "", updatedAt: "", comments: [], reviews: [], checks: { total: 0, failed: 0 }, ...over };
+}
+
+describe("prActivity", () => {
+  test("reports a new human comment", () => {
+    const prev = snap();
+    const next = snap({ comments: [{ author: "alice", ts: "t1", body: "one nit" }] });
+    expect(prActivity(prev, next)).toEqual(["new comment from alice: one nit"]);
+  });
+  test("reports a new review, with its body when there is one", () => {
+    const prev = snap();
+    const next = snap({ reviews: [{ author: "carol", state: "APPROVED", ts: "t2", body: "" }] });
+    expect(prActivity(prev, next)).toEqual(["review by carol: APPROVED"]);
+    const withBody = snap({ reviews: [{ author: "carol", state: "CHANGES_REQUESTED", ts: "t2", body: "fix the naming" }] });
+    expect(prActivity(prev, withBody)).toEqual(["review by carol: CHANGES_REQUESTED: fix the naming"]);
+  });
+  test("reports a state change", () => {
+    expect(prActivity(snap({ state: "OPEN" }), snap({ state: "MERGED" }))).toEqual(["pull request state changed from OPEN to MERGED"]);
+  });
+  test("reports a review decision and failing checks", () => {
+    const prev = snap();
+    const next = snap({ reviewDecision: "APPROVED", checks: { total: 3, failed: 1 } });
+    expect(prActivity(prev, next)).toEqual(["review decision is now APPROVED", "1 of 3 checks failing"]);
+  });
+  test("says nothing when nothing changed", () => {
+    const s = snap({ comments: [{ author: "alice", ts: "t1", body: "one nit" }], reviews: [{ author: "carol", state: "APPROVED", ts: "t2", body: "" }], reviewDecision: "APPROVED" });
+    expect(prActivity(s, snap({ ...s }))).toEqual([]);
+  });
+  test("ignores the pipeline's own decision comment", () => {
+    const body = decisionComment({ decision: "approve", text: "ship it", by: "eugene", taskId: 12 });
+    expect(isPipelineComment(body)).toBe(true);
+    expect(prActivity(snap(), snap({ comments: [{ author: "agentpipe-bot", ts: "t9", body }] }))).toEqual([]);
+  });
+  test("a first snapshot is only a baseline", () => {
+    expect(prActivity(null, snap({ state: "MERGED", comments: [{ author: "alice", ts: "t1", body: "hi" }] }))).toEqual([]);
   });
 });
