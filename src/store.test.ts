@@ -77,3 +77,28 @@ describe("pull request gates on a task", () => {
     expect(store.get(t.id)!.pr_gate).toEqual(gate);
   });
 });
+
+describe("openPrGates", () => {
+  test("lists only tasks with a gate that are still open, and honours the project filter", () => {
+    const add = (project: string, title: string) => store.add({ project, agent: "coder", title, description: title });
+    const attention = add("demo", "waiting on the human");
+    store.setPrGate(attention.id, makeGate());
+    store.setStatus(attention.id, "attention");
+    const queued = add("demo", "queued with a gate");
+    store.setPrGate(queued.id, makeGate());
+    const done = add("demo", "merged");
+    store.setPrGate(done.id, makeGate());
+    store.setStatus(done.id, "done");
+    const cancelled = add("demo", "abandoned");
+    store.setPrGate(cancelled.id, makeGate());
+    store.setStatus(cancelled.id, "cancelled");
+    const noGate = add("demo", "ordinary task");
+    const other = add("other", "another project's pull request");
+    store.setPrGate(other.id, makeGate());
+
+    expect(store.openPrGates().map((t) => t.id)).toEqual([attention.id, queued.id, other.id]);
+    expect(store.openPrGates("demo").map((t) => t.id)).toEqual([attention.id, queued.id]);
+    expect(store.openPrGates("demo").map((t) => t.id)).not.toContain(noGate.id);
+    expect(store.openPrGates("demo")[0].pr_gate!.pr_url).toBe("https://github.com/egirard/agentpipe/pull/42");
+  });
+});
