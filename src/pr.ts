@@ -1,3 +1,4 @@
+// src/pr.ts
 /**
  * What the pipeline knows about one pull request: its URL, a snapshot of its state, the human's
  * decision on it, and what changed since the last look. Pure: the commands that produce the data
@@ -102,4 +103,26 @@ export function snapshotFromJson(url: string, raw: unknown): PrSnapshot {
     reviews,
     checks: { total: rollup.length, failed },
   };
+}
+
+/** Marker the pipeline puts in every comment it posts, so it never reacts to its own words. */
+export const DECISION_MARKER = "agentpipe:decision";
+
+const DECISION_VERB: Record<PrDecision, string> = {
+  approve: "approved",
+  feedback: "changes requested",
+  deny: "rejected",
+};
+
+/** The comment body the pipeline posts to the pull request when the human has decided. */
+export function decisionComment(d: { decision: PrDecision; text: string; by: string; taskId: number }): string {
+  const lines = [`<!-- ${DECISION_MARKER}=${d.decision} task=#${d.taskId} -->`, `**agentpipe: ${DECISION_VERB[d.decision]} by ${d.by}**`];
+  const text = d.text.trim();
+  if (text) lines.push("", text);
+  return lines.join("\n");
+}
+
+/** True for a comment agentpipe itself posted. */
+export function isPipelineComment(body: string): boolean {
+  return body.includes(DECISION_MARKER);
 }

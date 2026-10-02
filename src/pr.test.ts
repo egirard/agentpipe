@@ -1,5 +1,6 @@
+// src/pr.test.ts
 import { describe, expect, test } from "bun:test";
-import { parsePrUrl, snapshotFromJson } from "./pr.ts";
+import { parsePrUrl, snapshotFromJson, decisionComment, isPipelineComment } from "./pr.ts";
 
 describe("parsePrUrl", () => {
   test("reads owner, repo and number from a github pull request url", () => {
@@ -56,5 +57,25 @@ describe("snapshotFromJson", () => {
     expect(snapshotFromJson(url, null).checks).toEqual({ total: 0, failed: 0 });
     expect(snapshotFromJson(url, "nope").comments).toEqual([]);
     expect(snapshotFromJson(url, { comments: "nope", reviews: 3, statusCheckRollup: null, state: 5 }).state).toBe("");
+  });
+});
+describe("decision comments", () => {
+  test("every decision round-trips through isPipelineComment", () => {
+    for (const decision of ["approve", "feedback", "deny"] as const) {
+      const body = decisionComment({ decision, text: "please see the notes", by: "eugene", taskId: 12 });
+      expect(isPipelineComment(body)).toBe(true);
+      expect(body.split("\n")[0]).toBe(`<!-- agentpipe:decision=${decision} task=#12 -->`);
+      expect(body).toContain("by eugene");
+      expect(body).toContain("please see the notes");
+    }
+  });
+  test("the heading names what happened", () => {
+    expect(decisionComment({ decision: "approve", text: "", by: "eugene", taskId: 1 })).toBe("<!-- agentpipe:decision=approve task=#1 -->\n**agentpipe: approved by eugene**");
+    expect(decisionComment({ decision: "feedback", text: "", by: "eugene", taskId: 1 })).toContain("changes requested by eugene");
+    expect(decisionComment({ decision: "deny", text: "", by: "eugene", taskId: 1 })).toContain("rejected by eugene");
+  });
+  test("a human comment is not a pipeline comment", () => {
+    expect(isPipelineComment("looks good to me")).toBe(false);
+    expect(isPipelineComment("")).toBe(false);
   });
 });
