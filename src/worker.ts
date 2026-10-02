@@ -474,3 +474,31 @@ function prReviewDescription(task: Task): string {
   lines.push("", PR_REVIEW_PLAYBOOK);
   return lines.join("\n");
 }
+
+/**
+ * A pull request a task opened needs a human decision, so one review task per pull request is
+ * queued with a gate attached. Returns null, changing nothing, when the feature is off, the task
+ * opened no pull request, the task is itself a gate task, the gate agent is not registered, or a
+ * gate for the same pull request is already open.
+ */
+export function queuePrReview(store: Store, gcfg: GlobalConfig, task: Task, registry: Registry): Task | null {
+  if (!gcfg.prReview.enabled) return null;
+  if (!task.pr_url) return null;
+  if (task.agent === gcfg.prReview.agent) return null;
+  if (!registry.agents.has(gcfg.prReview.agent)) return null;
+  if (store.openPrGates(task.project).some((t) => t.pr_gate?.pr_url === task.pr_url)) return null;
+  const review = store.add({
+    project: task.project,
+    agent: gcfg.prReview.agent,
+    title: clip(`Review PR for #${task.id}: ${task.title}`, 200),
+    description: prReviewDescription(task),
+    acceptance: PR_REVIEW_ACCEPTANCE,
+    parent_id: task.id,
+    branch: task.branch,
+    priority: Math.max(1, task.priority - 10),
+    created_by: `worker#${task.id}`,
+  });
+  store.setPrGate(review.id, { pr_url: task.pr_url, source_task: task.id, decision: null, snapshot: null, checked_at: null, log: [] });
+  store.event(task.id, "pr-review", `queued #${review.id} to shepherd ${task.pr_url}`);
+  return store.get(review.id)!;
+}
