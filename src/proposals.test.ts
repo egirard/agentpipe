@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { APPROVER_ASSOCIATIONS, BOT_MARKER, decisionComment, decisionFromComment, isPipelineComment, issueBody, issueTitle, proposalMarker, revisionComment, type IssueComment } from "./proposals.ts";
+import { APPROVER_ASSOCIATIONS, BOT_MARKER, decisionComment, decisionFromComment, isPipelineComment, issueBody, issueTitle, latestCommentTs, newComments, proposalMarker, revisionComment, type IssueComment } from "./proposals.ts";
 import type { AgentProposal } from "./result.ts";
 
 export const proposal: AgentProposal = {
@@ -103,5 +103,25 @@ describe("decisionFromComment", () => {
   });
   test("the pipeline never reads its own comments", () => {
     expect(decisionFromComment(comment(decisionComment("approved", "egirard", "")))).toBe(null);
+  });
+});
+
+describe("newComments", () => {
+  const thread: IssueComment[] = [
+    comment("second", "OWNER", "egirard", "2026-02-02T00:00:00Z"),
+    comment(`queued it\n\n${BOT_MARKER}`, "OWNER", "agentpipe", "2026-02-03T00:00:00Z"),
+    comment("first", "NONE", "passerby", "2026-02-01T00:00:00Z"),
+    comment("third", "OWNER", "egirard", "2026-02-04T00:00:00Z"),
+  ];
+  test("drops the pipeline's own comments and sorts ascending", () => {
+    expect(newComments(thread, null).map((c) => c.body)).toEqual(["first", "second", "third"]);
+  });
+  test("drops anything at or before the cursor", () => {
+    expect(newComments(thread, "2026-02-02T00:00:00Z").map((c) => c.body)).toEqual(["third"]);
+    expect(newComments(thread, "2026-02-04T00:00:00Z")).toEqual([]);
+  });
+  test("the cursor is the newest timestamp in the whole thread", () => {
+    expect(latestCommentTs(thread)).toBe("2026-02-04T00:00:00Z");
+    expect(latestCommentTs([])).toBe(null);
   });
 });

@@ -116,3 +116,19 @@ export function decisionFromComment(c: IssueComment, approvers: string[] = []): 
   if (/^(dismiss(ed)?|decline[d]?|reject(ed)?)\b/.test(line)) return "dismissed";
   return null;
 }
+
+/** The human comments the pipeline has not read yet, oldest first. */
+export function newComments(comments: IssueComment[], cursor: string | null): IssueComment[] {
+  return comments
+    .filter((c) => !isPipelineComment(c))
+    .filter((c) => !cursor || c.createdAt > cursor)
+    .slice()
+    .sort((a, b) => (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0));
+}
+
+/** The newest timestamp in the thread, to store as the cursor. Null for an empty thread. */
+export function latestCommentTs(comments: IssueComment[]): string | null {
+  let out: string | null = null;
+  for (const c of comments) if (out === null || c.createdAt > out) out = c.createdAt;
+  return out;
+}
