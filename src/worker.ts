@@ -446,3 +446,31 @@ export function createSubtasks(store: Store, gcfg: GlobalConfig, parent: Task, s
   if (created.length) store.event(parent.id, "subtasks", created.map((t) => `#${t.id} [${t.agent}] ${t.title}`).join("; "));
   return created;
 }
+
+/**
+ * What the gate agent must do on each run. Copied onto every review task, so the task stands on
+ * its own for an agent that has no other context.
+ */
+const PR_REVIEW_PLAYBOOK =
+  "The human decides on the status page: Approve, Give feedback, or Deny. On your first run, read the pull request and present it: what it changes, whether its checks pass, anything risky, and the link. End with status attention, saying the human may approve, give feedback or deny. On a later run a reply will tell you the decision the human made or what changed on the pull request; act on it and do not ask again.";
+
+/** Acceptance criteria written onto every review task. */
+const PR_REVIEW_ACCEPTANCE = [
+  "The summary links the pull request and says what it changes and whether its checks pass",
+  "The task ends in attention asking the human to approve, give feedback or deny, unless a decision or new pull request activity is already in the replies",
+  "Nothing is merged, closed or commented on GitHub by this task",
+];
+
+/** The review task's description: the pull request, where it came from, and what to do with it. */
+function prReviewDescription(task: Task): string {
+  const lines = [
+    "A pull request this pipeline opened is waiting for the human.",
+    "",
+    `- Pull request: ${task.pr_url}`,
+    `- Branch: ${task.branch ?? "(unknown)"}${task.base_branch ? `, from ${task.base_branch}` : ""}`,
+    `- Opened by task #${task.id} [${task.agent}]: ${task.title}`,
+  ];
+  if (task.acceptance.length) lines.push("", `Acceptance criteria of #${task.id}:`, ...task.acceptance.map((a) => `- ${a}`));
+  lines.push("", PR_REVIEW_PLAYBOOK);
+  return lines.join("\n");
+}
