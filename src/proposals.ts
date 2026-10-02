@@ -92,3 +92,27 @@ export function isPipelineComment(c: { body: string }): boolean {
 
 /** GitHub author associations we trust to decide a proposal. */
 export const APPROVER_ASSOCIATIONS = ["OWNER", "MEMBER", "COLLABORATOR"];
+
+/**
+ * The owner's decision, read out of one issue comment. Only comments from someone trusted count,
+ * and only when the decision is the first thing they say: "I approved this last week" is prose,
+ * not an approval.
+ */
+export function decisionFromComment(c: IssueComment, approvers: string[] = []): "approved" | "dismissed" | null {
+  if (isPipelineComment(c)) return null;
+  const trusted =
+    APPROVER_ASSOCIATIONS.includes(c.association.toUpperCase()) ||
+    approvers.some((a) => a.toLowerCase() === c.author.toLowerCase());
+  if (!trusted) return null;
+  const first = c.body.split("\n").map((l) => l.trim()).find((l) => l.length > 0);
+  if (!first) return null;
+  const line = first
+    .replace(/[*_`]/g, "")
+    .replace(/^\/+/, "")
+    .trim()
+    .replace(/[\s.,:;!?)\]-]+$/, "")
+    .toLowerCase();
+  if (/^approved?\b/.test(line)) return "approved";
+  if (/^(dismiss(ed)?|decline[d]?|reject(ed)?)\b/.test(line)) return "dismissed";
+  return null;
+}

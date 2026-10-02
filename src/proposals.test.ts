@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { APPROVER_ASSOCIATIONS, BOT_MARKER, decisionComment, isPipelineComment, issueBody, issueTitle, proposalMarker, revisionComment } from "./proposals.ts";
+import { APPROVER_ASSOCIATIONS, BOT_MARKER, decisionComment, decisionFromComment, isPipelineComment, issueBody, issueTitle, proposalMarker, revisionComment, type IssueComment } from "./proposals.ts";
 import type { AgentProposal } from "./result.ts";
 
 export const proposal: AgentProposal = {
@@ -73,5 +73,35 @@ describe("pipeline comments", () => {
       expect(c.endsWith(BOT_MARKER)).toBe(true);
     }
     expect(decisionComment("approved", "egirard", "queued as task #58")).toContain("task #58");
+  });
+});
+
+function comment(body: string, association = "OWNER", author = "egirard", createdAt = "2026-01-01T00:00:00Z"): IssueComment {
+  return { author, association, createdAt, body };
+}
+
+describe("decisionFromComment", () => {
+  test("an owner approving in any of the usual shapes", () => {
+    expect(decisionFromComment(comment("Approved"))).toBe("approved");
+    expect(decisionFromComment(comment("approved: go ahead"))).toBe("approved");
+    expect(decisionFromComment(comment("`approved`"))).toBe("approved");
+  });
+  test("a stranger's approval does not count unless they are listed", () => {
+    expect(decisionFromComment(comment("Approved", "NONE"))).toBe(null);
+    expect(decisionFromComment(comment("approved: go ahead", "NONE"))).toBe(null);
+    expect(decisionFromComment(comment("Approved", "NONE", "driveby"), ["egirard"])).toBe(null);
+    expect(decisionFromComment(comment("Approved", "NONE"), ["EGirard"])).toBe("approved");
+  });
+  test("prose that merely mentions approval is feedback, not a decision", () => {
+    expect(decisionFromComment(comment("I approved this last week"))).toBe(null);
+    expect(decisionFromComment(comment("can it also run migrations down?"))).toBe(null);
+  });
+  test("dismissal words", () => {
+    expect(decisionFromComment(comment("reject - too narrow"))).toBe("dismissed");
+    expect(decisionFromComment(comment("Dismissed."))).toBe("dismissed");
+    expect(decisionFromComment(comment("declined, the architect can do it"))).toBe("dismissed");
+  });
+  test("the pipeline never reads its own comments", () => {
+    expect(decisionFromComment(comment(decisionComment("approved", "egirard", "")))).toBe(null);
   });
 });
