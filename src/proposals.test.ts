@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { APPROVER_ASSOCIATIONS, BOT_MARKER, isPipelineComment, issueTitle, proposalMarker } from "./proposals.ts";
+import { APPROVER_ASSOCIATIONS, BOT_MARKER, isPipelineComment, issueBody, issueTitle, proposalMarker } from "./proposals.ts";
 import type { AgentProposal } from "./result.ts";
 
 export const proposal: AgentProposal = {
@@ -26,5 +26,34 @@ describe("proposal markers and title", () => {
     expect(APPROVER_ASSOCIATIONS).toContain("OWNER");
     expect(APPROVER_ASSOCIATIONS).toContain("COLLABORATOR");
     expect(APPROVER_ASSOCIATIONS).not.toContain("NONE");
+  });
+});
+
+describe("issueBody", () => {
+  const body = issueBody({ id: 7, proposal, proposedBy: "architect", taskId: 42, project: "agentpipe", times: 3 });
+  test("names the agent, the runtime, the why and the shell groups", () => {
+    expect(body).toContain("db-migrator");
+    expect(body).toContain("claude");
+    expect(body).toContain("No registered agent can change the schema safely");
+    expect(body).toContain("git-read");
+    expect(body).toContain("checks");
+    expect(body).toContain("## Why");
+  });
+  test("says how to decide and who asked for it", () => {
+    expect(body).toContain("approved");
+    expect(body).toContain("## How to decide");
+    expect(body).toContain("architect");
+    expect(body).toContain("task #42");
+    expect(body).toContain("agentpipe");
+    expect(body).toContain("3 times");
+  });
+  test("ends with the proposal marker and the bot marker", () => {
+    expect(body.endsWith(`${proposalMarker(7)}\n${BOT_MARKER}`)).toBe(true);
+  });
+  test("a proposal with no task, project or shell groups still renders", () => {
+    const b = issueBody({ id: 1, proposal: { ...proposal, shell: [], inputs: "", commits: false }, proposedBy: "egirard", taskId: null, project: null, times: 1 });
+    expect(b).toContain("shell groups: none");
+    expect(b).toContain("not specified");
+    expect(b).toContain("1 time so far");
   });
 });
