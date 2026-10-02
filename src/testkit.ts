@@ -58,6 +58,7 @@ export function fakeContext(over: Partial<VerifyContext> & { result: AgentResult
     lane: null,
     worktree: null,
     confirmation: null,
+    pr_gate: null,
   };
   const { files: _f, ...rest } = over;
   return {
