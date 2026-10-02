@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { APPROVER_ASSOCIATIONS, BOT_MARKER, decisionComment, decisionFromComment, isPipelineComment, issueBody, issueTitle, latestCommentTs, newComments, proposalMarker, revisionComment, type IssueComment } from "./proposals.ts";
+import { APPROVER_ASSOCIATIONS, BOT_MARKER, decisionComment, decisionFromComment, feedbackDigest, isPipelineComment, issueBody, issueTitle, latestCommentTs, newComments, proposalMarker, revisionComment, type IssueComment } from "./proposals.ts";
 import type { AgentProposal } from "./result.ts";
 
 export const proposal: AgentProposal = {
@@ -123,5 +123,25 @@ describe("newComments", () => {
   test("the cursor is the newest timestamp in the whole thread", () => {
     expect(latestCommentTs(thread)).toBe("2026-02-04T00:00:00Z");
     expect(latestCommentTs([])).toBe(null);
+  });
+});
+
+describe("feedbackDigest", () => {
+  const rows = [
+    { ts: "2026-02-01T10:00:00Z", author: "egirard", body: "too narrow,\nmake it handle rollbacks" },
+    { ts: "2026-02-02T10:00:00Z", author: "reviewer", body: "agree" },
+  ];
+  test("one bullet per row, naming the date and the author", () => {
+    const d = feedbackDigest(rows);
+    expect(d).toContain("- (2026-02-01, egirard)");
+    expect(d).toContain("reviewer");
+    expect(d).toContain("make it handle rollbacks");
+    expect(d.split("\n")).toHaveLength(2);
+    expect(feedbackDigest([])).toBe("");
+  });
+  test("long feedback is clipped", () => {
+    const d = feedbackDigest([{ ts: "2026-02-01T10:00:00Z", author: "egirard", body: "x".repeat(500) }], 200);
+    expect(d.length).toBeLessThan(400);
+    expect(d).toContain("omitted");
   });
 });

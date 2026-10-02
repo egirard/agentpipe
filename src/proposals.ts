@@ -1,4 +1,5 @@
 import type { AgentProposal } from "./result.ts";
+import { clip } from "./util.ts";
 
 /**
  * Rendering and parsing for agent proposals published as GitHub issues: the issue body, the
@@ -131,4 +132,10 @@ export function latestCommentTs(comments: IssueComment[]): string | null {
   let out: string | null = null;
   for (const c of comments) if (out === null || c.createdAt > out) out = c.createdAt;
   return out;
+}
+
+/** The feedback on a proposal so far, as one block the architect can read in a prompt. */
+export function feedbackDigest(rows: { ts: string; author: string; body: string }[], max = 4000): string {
+  const lines = rows.map((r) => `- (${r.ts.slice(0, 10)}, ${r.author}) ${r.body.replace(/\s+/g, " ").trim()}`);
+  return clip(lines.join("\n"), max);
 }
