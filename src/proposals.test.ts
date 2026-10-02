@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { APPROVER_ASSOCIATIONS, BOT_MARKER, isPipelineComment, issueBody, issueTitle, proposalMarker } from "./proposals.ts";
+import { APPROVER_ASSOCIATIONS, BOT_MARKER, decisionComment, isPipelineComment, issueBody, issueTitle, proposalMarker, revisionComment } from "./proposals.ts";
 import type { AgentProposal } from "./result.ts";
 
 export const proposal: AgentProposal = {
@@ -55,5 +55,23 @@ describe("issueBody", () => {
     expect(b).toContain("shell groups: none");
     expect(b).toContain("not specified");
     expect(b).toContain("1 time so far");
+  });
+});
+
+describe("pipeline comments", () => {
+  test("a revision repeats the fields and the note", () => {
+    const c = revisionComment({ ...proposal, runtime: "ollama" }, "Narrowed to SQLite only, per your comment.");
+    expect(c).toContain("## Revised specification");
+    expect(c).toContain("runtime: ollama");
+    expect(c).toContain("Narrowed to SQLite only");
+    expect(c.endsWith(BOT_MARKER)).toBe(true);
+  });
+  test("every decision comment is recognised as a pipeline comment", () => {
+    for (const status of ["approved", "dismissed", "created"] as const) {
+      const c = decisionComment(status, "egirard", "");
+      expect(isPipelineComment({ body: c })).toBe(true);
+      expect(c.endsWith(BOT_MARKER)).toBe(true);
+    }
+    expect(decisionComment("approved", "egirard", "queued as task #58")).toContain("task #58");
   });
 });

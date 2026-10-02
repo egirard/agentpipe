@@ -58,6 +58,34 @@ export function issueBody(input: { id: number; proposal: AgentProposal; proposed
   ].join("\n");
 }
 
+/** Posted when the architect sharpens a proposal after feedback. */
+export function revisionComment(p: AgentProposal, note: string): string {
+  return [
+    "## Revised specification",
+    "",
+    p.description.trim(),
+    "",
+    fieldList(p),
+    "",
+    note.trim(),
+    "",
+    BOT_MARKER,
+  ].join("\n");
+}
+
+/** Posted when a proposal is decided or the agent has been built. */
+export function decisionComment(status: "approved" | "dismissed" | "created", by: string, detail: string): string {
+  const d = detail.trim();
+  const tail = d ? ` ${d}` : "";
+  const first =
+    status === "approved"
+      ? `Approved by ${by}. The pipeline has queued the agent-creator agent to build this agent; its result lands on this issue.${tail}`
+      : status === "dismissed"
+        ? `Dismissed by ${by}. No agent will be created from this proposal; propose it again if that changes.${tail}`
+        : `Created by ${by}. The agent exists now and the architect can assign work to it.${tail}`;
+  return [first, "", BOT_MARKER].join("\n");
+}
+
 export function isPipelineComment(c: { body: string }): boolean {
   return c.body.includes(BOT_MARKER);
 }
