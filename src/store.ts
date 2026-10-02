@@ -518,6 +518,22 @@ export class Store {
     return this.update(id, { pr_gate: gate });
   }
 
+  /** Tasks whose pull request is still being watched; finished and cancelled ones are left alone. */
+  openPrGates(project?: string): Task[] {
+    const statuses: TaskStatus[] = ["queued", "blocked", "running", "waiting", "review", "attention"];
+    const params: any[] = [...statuses];
+    let sql = `SELECT * FROM tasks WHERE pr_gate IS NOT NULL AND status IN (${statuses.map(() => "?").join(",")})`;
+    if (project) {
+      sql += " AND project = ?";
+      params.push(project);
+    }
+    sql += " ORDER BY id ASC";
+    return this.db
+      .query(sql)
+      .all(...params)
+      .map((r) => this.row(r)!);
+  }
+
   /* ---------- replies: the human answering an agent ---------- */
 
   reply(taskId: number, author: string, text: string): Reply {
