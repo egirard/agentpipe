@@ -383,6 +383,17 @@ function finish(store: Store, gcfg: GlobalConfig, task: Task, outcome: RunOutcom
   const t = store.get(task.id)!;
   log(`worker: #${task.id} -> ${t.status}${t.pr_url ? ` (${t.pr_url})` : ""}${t.cost_usd ? ` $${t.cost_usd.toFixed(2)}` : ""}`);
 
+  // A pull request the task opened waits for a human: queue the task that shepherds it. A missing
+  // gate agent or an unreadable registry must never break the task that just finished.
+  if (outcome && t.pr_url) {
+    try {
+      const review = queuePrReview(store, gcfg, t, registry ?? loadRegistry(gcfg.projects[t.project]));
+      if (review) log(`worker: queued #${review.id} [${review.agent}] to shepherd ${t.pr_url}`);
+    } catch (e) {
+      log(`worker: could not queue a pull request review for #${t.id}: ${(e as Error).message}`);
+    }
+  }
+
   if (t.status === "attention" || t.status === "failed" || t.status === "cancelled") {
     const pending = t.confirmation?.status === "pending" ? t.confirmation.request : null;
     void notify(gcfg, {
