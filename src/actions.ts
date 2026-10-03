@@ -99,6 +99,67 @@ export function replyToTask(store: Store, id: number, text: string, author: stri
   return { task: store.get(id)!, requeued: false, note };
 }
 
+export interface EditTaskInput {
+  title?: string | null;
+  description?: string | null;
+  acceptance?: string[] | null;
+  agent?: string | null;
+  priority?: number | null;
+  files?: string[] | null;
+}
+
+/**
+ * Change what a task asks for before (or after) it runs: a stale description written before the
+ * roster changed, a wrong agent, acceptance criteria that need a line. Running tasks are refused;
+ * the change is recorded as an event so the history says what the agent actually saw.
+ */
+export function editTask(store: Store, gcfg: GlobalConfig, id: number, patch: EditTaskInput, by: string): Task {
+  const t = store.get(id);
+  if (!t) throw new Error(`no task #${id}`);
+  if (t.status === "running") throw new Error(`#${id} is running; wait for it to finish (or cancel it) before editing`);
+  const changes: Partial<Parameters<Store["update"]>[1]> = {};
+  const what: string[] = [];
+  if (patch.title != null && patch.title.trim() && patch.title.trim() !== t.title) {
+    changes.title = patch.title.trim().slice(0, 200);
+    what.push("title");
+  }
+  if (patch.description != null && patch.description.trim() && patch.description.trim() !== t.description) {
+    changes.description = patch.description.trim();
+    what.push("description");
+  }
+  if (patch.acceptance != null) {
+    const acc = patch.acceptance.map((a) => a.trim()).filter(Boolean);
+    if (JSON.stringify(acc) !== JSON.stringify(t.acceptance)) {
+      changes.acceptance = acc;
+      what.push("acceptance");
+    }
+  }
+  if (patch.files != null) {
+    const files = patch.files.map((f) => f.trim()).filter(Boolean);
+    if (JSON.stringify(files) !== JSON.stringify(t.files)) {
+      changes.files = files;
+      what.push("files");
+    }
+  }
+  if (patch.agent != null && patch.agent.trim() && patch.agent.trim() !== t.agent) {
+    const project = gcfg.projects[t.project];
+    if (!project) throw new Error(`project "${t.project}" is not configured`);
+    requireAgent(loadRegistry(project), patch.agent.trim());
+    changes.agent = patch.agent.trim();
+    what.push(`agent ${t.agent} -> ${changes.agent}`);
+  }
+  if (patch.priority != null && patch.priority !== t.priority) {
+    const p = Number(patch.priority);
+    if (!Number.isInteger(p) || p < 1 || p > 99) throw new Error("priority is a whole number from 1 (urgent) to 99");
+    changes.priority = p;
+    what.push(`priority ${t.priority} -> ${p}`);
+  }
+  if (!what.length) return t;
+  const out = store.update(id, changes);
+  store.event(id, "edited", `by ${by}: ${what.join(", ")}`);
+  return out;
+}
+
 export function retryTask(store: Store, id: number, by: string): Task {
   const t = store.get(id);
   if (!t) throw new Error(`no task #${id}`);

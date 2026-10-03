@@ -600,8 +600,9 @@ export class Store {
     return out;
   }
 
-  spendToday(): number {
-    return this.spend(new Date().toISOString().slice(0, 10) + "T00:00:00.000Z").total;
+  spendToday(project?: string): number {
+    const s = this.spend(new Date().toISOString().slice(0, 10) + "T00:00:00.000Z");
+    return project ? (s.byProject[project] ?? 0) : s.total;
   }
 
   /** Outcome mix over an agent's last `window` finished runs (per version when given). */

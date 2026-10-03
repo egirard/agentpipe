@@ -170,6 +170,11 @@ at the end. Result mapping: a fully green run is `done`; anything else is `atten
 blocker finding per failed step and one for an architect that gave up. The summary is the
 pipeline's `report.md`. Assets: the branch, one commit per step, the PR when the project pushes.
 This runtime ignores `prompt`, `tools`, `can_delegate` and `commits` (it always commits).
+Guards around the local model: a writable file larger than `limits.coderMaxFileChars` skips the
+local attempts (the model must return whole files and cannot hold one that big) and goes to the
+cloud fixer; a returned file that shrank to a fragment or JSON that does not parse is refused
+before anything is written; the local reviewer may send a step back once, then green checks win;
+plan-step files marked `executable` get mode 755 after every write, since no model can chmod.
 
 **claude.** One headless Claude Code session (`claude -p`) in the worktree, held to the result
 schema with `--json-schema`. Tools: `Read`, `Grep`, `Glob`, `LS` always; `Edit`, `Write`,
@@ -192,7 +197,10 @@ in environment variables: `AGENTPIPE_TASK_ID`, `AGENTPIPE_TASK_TITLE`,
 (space-joined), `AGENTPIPE_TASK_BRANCH`, `AGENTPIPE_BASE_BRANCH`, `AGENTPIPE_PROJECT`,
 `AGENTPIPE_REPO`, `AGENTPIPE_AGENT_DIR`. Credentials are stripped from the environment. Exit 0
 is `done`, anything else `attention`; the output (clipped) is the summary and the full output is
-saved under the run directory. No model is involved.
+saved under the run directory. No model is involved. A shell agent may set `commits: true`: it
+then gets a branch, and what its command wrote is verified, checked, committed and pushed like
+any other agent's work (`upstream-importer` is the example: `bun "$AGENTPIPE_AGENT_DIR/import.ts"`,
+a script shipped in the agent's own directory, which the `ops` group allows in that form).
 
 ### 3.4 The result contract
 
@@ -205,8 +213,10 @@ Every runtime ends in this shape (`AgentResult` in `src/result.ts`):
   "findings": [ { "severity": "blocker"|"major"|"minor"|"info", "path": "optional/file", "description": "..." } ],
   "subtasks": [ { "title": "...", "description": "...", "agent": "coder",
                   "acceptance": ["src/x.test.ts exists and passes", "bun run lint is green"],
-                  "priority": 40, "after": [0], "files": ["src/x.ts"], "branch": "agentpipe/..." } ],
+                  "priority": 40, "after": [0], "files": ["src/x.ts"], "branch": "agentpipe/...",
+                  "project": "other-stream" } ],   // project: another registered stream to queue it in (default: this one)
   "projects": [ ... ],          // only agents with can_create_projects (section 3.9)
+  "upstreams": [ { "repo": "egirard/TabletopTemplate", "name": "tabletop-template", "ref": "main", "why": "..." } ],  // same agents: fetched read-only into THIS project's checkout
   "agent_proposals": [ { "name": "db-migrator", "runtime": "claude", "description": "...", "why": "...",
                          "inputs": "...", "outputs": "...", "commits": true, "shell": ["checks"] } ],  // only can_delegate agents
   "confirmation": { "title": "...", "why": "...", "risk": "...", "links": [], "continue_after": false,   // only requires_confirmation agents
@@ -243,7 +253,9 @@ Two more outcomes are decided by the worker, not the agent:
 - **Output verification failed** (any runtime with a verifier). The agent's own `verify.ts`
   found problems with what was produced. The status is forced to `attention`, each problem becomes
   a blocker finding prefixed "output verification:", the branch (if any) is committed for
-  inspection, and nothing is pushed. Section 3.5.
+  inspection, nothing is pushed, and **subtasks are not created**: they are listed in the summary
+  and the agent sees the problems on its next run (a plan that failed verification is not a plan).
+  Section 3.5.
 - **Checks failed after edits** (`commits` agents only). Lint or the unit suite failed on the
   agent's changes. The branch is committed for inspection, the status is forced to `attention`,
   and the failing output is appended to the summary.
@@ -323,8 +335,9 @@ The user message is assembled from the task and `manifest.context`, in this orde
 1. **Task block** (always): `# Task #id: title`, the description, the acceptance criteria, the
    **continuation** when the task ran before or a human replied (below), the
    project (name, path, base branch or stream branch and parent, the stream's goal, the branch the
-   worktree is on, a one-line stack summary read from the package manifest), the repository's `AGENTPIPE.md` notes if it has one, and the parent
-   task if any.
+   worktree is on, a one-line stack summary read from the package manifest), the repository's `AGENTPIPE.md` notes if it has one,
+   the project's **upstream repositories** (each `upstream/<name>/` with its repository and pinned
+   commit, and how to read them) when it has any, and the parent task if any.
 2. `files`: the contents of the task's `files`, inline, clipped to the project's
    `limits.coderContextChars` in total; missing files are listed as such.
 3. `branch-diff`: when the task has a branch, `git diff base...branch` clipped to 40k characters.
@@ -363,7 +376,9 @@ what is handed to them up front. Ollama and shell agents get nothing beyond this
 ### 3.7 Delegation
 
 An agent with `can_delegate` may return `subtasks`. The worker turns them into child tasks of the
-current one, in the same project, then puts the parent into `waiting`:
+current one, in the same project unless a subtask names another registered `project` (a stream
+the task just created, for instance; the agent must exist there too), then puts the parent into
+`waiting`:
 
 - Each subtask must name a registered agent; the JSON schema enumerates the names, so a Claude
   agent cannot invent one. Unknown names (possible from hand-written or Ollama results) are
@@ -408,7 +423,12 @@ No agent asks for raw shell tools. A manifest names capability groups and one mo
 | `gh-comment` | `gh pr comment`, `gh issue comment` |
 | `checks` | the project's lint and unit commands, `bunx vitest`, `bun test` and the usual linters; added automatically for `commits` agents |
 | `package-read` | `bun outdated`, `npm view`, version queries |
-| `ops` | installs with the lockfile, builds, `bun run <script>`, test suites, file inspection inside the checkout; **shell-runner only** |
+| `ops` | installs with the lockfile, builds, `bun run <script>`, test suites, file inspection inside the checkout, `bun "$AGENTPIPE_AGENT_DIR/<script>"` for a shell agent's own script; **shell-runner only** (shell-runtime commands get it implicitly) |
+
+`git-read` verbs also work as `git -C <dir> <verb>` for a directory inside the checkout (an
+upstream copy); `checks` (which every committing agent has) allows `chmod +x` or `chmod 755` on
+one relative path. `find -exec` is not indirect execution; `exec`, `eval` and `source` as
+commands are.
 
 The policy is enforced twice for Claude agents: the groups become `--allowedTools` patterns, and
 a PreToolUse hook (`agentpipe shell-check`) inspects every Bash call before it runs, splitting
@@ -453,6 +473,10 @@ with `requires_confirmation: true` (claude runtime only) lets it *propose*:
 5. Reject cancels the task with the reason. A reply or retry supersedes a pending request; the
    agent asks afresh if it still needs to.
 
+A request with a refused step is not thrown away: the runtime sends the problems back to the agent
+once, in the same run, so it can rewrite the request; only a second refusal ends the run in
+`attention` with the problems as findings.
+
 The built-in `github` and `agent-creator` agents are the two examples; their verifiers add the
 role-specific rules (git/gh commands only and named destruction for github; one package under the
 machine agents directory with a parsing manifest and a final test run for agent-creator). The
@@ -467,7 +491,8 @@ ollama agents, which share the one GPU) and `cloud` x1 (claude and shell agents)
 claim is atomic, and dependencies are respected across lanes.
 
 **Budgets.** Every Claude call's cost (as reported by Claude Code) is recorded per task, agent and
-project. `budgets.taskUsd` caps one task; `budgets.dailyUsd` caps the UTC day, after which lanes
+project. `budgets.taskUsd` caps one task; a project's own `dailyUsd` caps that stream's cloud
+tasks for the UTC day (its local ones keep going); `budgets.dailyUsd` caps the UTC day, after which lanes
 only claim agents that do not spend (ollama, shell) until the next day. `agentpipe spend` and the
 status page show the numbers.
 
@@ -487,6 +512,12 @@ or `projects create` (clone, new, branch), or let an agent with `can_create_proj
 architect) return `projects`: code creates each one, runs the local steps, holds GitHub steps
 for `agentpipe projects approve`, and queues `project-setup` and a kickoff architect task in it.
 Every agent's prompt carries the stream's goal.
+A project may hold **upstream repositories** (`upstreams` in its config; `agentpipe projects
+upstream add`, an `upstreams` list in a ProjectSpec, or `upstreams` in a project-creating agent's
+result): read-only clones under `<checkout>/upstream/<name>/`, excluded from git via the shared
+exclude file, symlinked into every worktree, pinned by commit in the config and rendered into
+every prompt. Fetching is a read and happens at once. The task that created a stream is closed
+when the human approves the stream's held GitHub steps; the stream's own queue carries the work.
 A project can carry its own agents (`agentsDir`), its own pipeline tuning (`agentpipe.json` in
 the repo) and its own guidance for agents (`AGENTPIPE.md` at the repo root, read into every
 prompt: conventions, forbidden areas, how to run things). Prompts describe the stack from the
@@ -522,7 +553,7 @@ If you cannot write these four fields in a few lines, the agent is doing two job
 | read, judge, plan, report | `claude` with `commits: false` | The default for reviewers, auditors, planners, managers. |
 | edit non-code files (docs, SVG, config) | `claude` with `commits: true` | Lint and the unit suite still run afterwards; the prompt must fence what may be touched, since tools cannot. |
 | give a cheap, offline opinion | `ollama` | Small inputs only. Escalate anything serious to a `claude` reviewer in the prompt's own words. |
-| run a program and report its exit code | `shell` | Test suites, linters, builds, scripted checks. The command is policy-checked; anything it needs beyond `ops` will not run. |
+| run a program and report its exit code | `shell` | Test suites, linters, builds, scripted checks. The command is policy-checked; anything it needs beyond `ops` will not run. With `commits: true` the command's file changes become a branch and PR (upstream-importer). |
 | run arbitrary-but-vetted commands for other agents | delegate to `shell-runner` | Do not create a second agent with `ops`; the registry refuses it. |
 
 Rules of thumb: prefer the cheapest runtime that can do the job; keep `max_turns` tight (a
@@ -740,6 +771,8 @@ finding. Then: `agentpipe agents test dependency-auditor`, once with `--e2e`, th
   "attachments" field. If an agent produces something else (an image, a data file), it should
   commit it (`commits: true`) or name its path in the summary.
 - Nothing turns GitHub issues into tasks yet; agents with `gh-read` can read them.
+- Claude agents read PDFs and images with the Read tool; spreadsheets and archives are not
+  readable by any agent. An agent that needs one asks for a CSV or text export in `attention`.
 - The shell policy is a pattern matcher, not a sandbox: it refuses what it recognises and
   refuses what no group covers, but a command that passes still runs with the worker's own
   permissions inside the worktree.

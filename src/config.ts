@@ -33,6 +33,8 @@ export interface Config {
     replans: number;
     /** Max characters of source handed to the local coder per step. */
     coderContextChars: number;
+    /** A writable file larger than this skips the local coder (it must return whole files and cannot hold one this big) and goes to the cloud fixer. */
+    coderMaxFileChars: number;
     /** Max characters of test output inlined into a prompt. Full outputs are always saved under the run dir. */
     testOutputChars: number;
     /** Seconds before a test command is killed. */
@@ -67,6 +69,7 @@ export const DEFAULTS: Omit<Config, "repo"> = {
     cloudIterations: 25,
     replans: 2,
     coderContextChars: 40_000,
+    coderMaxFileChars: 20_000,
     testOutputChars: 12_000,
     commandTimeoutSec: 900,
   },

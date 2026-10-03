@@ -1,3 +1,4 @@
+import { chmodSync, existsSync } from "node:fs";
 import type { Config } from "../config.ts";
 import { ollamaJson, type OllamaMessage } from "../ollama.ts";
 import { CoderOutput, coderOutputSchema, type PlanStep } from "../plan.ts";
@@ -88,9 +89,26 @@ export async function runCoder(cfg: Config, step: PlanStep, round: CoderRound, a
     CoderOutput.parse(v),
   );
 
+  const { files, problems } = checkCoderFiles(cfg, step, out.files);
+  // Nothing is written when any file is unusable: a truncated file on disk would pass lint in a
+  // repository whose checks do not parse it, and then be committed (that happened to a 44 KB page).
+  if (problems.length) throw new Error(problems.join(" "));
+  for (const f of files) writeFile(cfg.repo, f.path, f.content.endsWith("\n") ? f.content : f.content + "\n");
+  applyModes(cfg.repo, step);
+  log(`  coder wrote ${files.length} file(s): ${files.map((f) => f.path).join(", ") || "none"}`);
+  return { files, explanation: out.explanation };
+}
+
+/**
+ * What the local model returned, filtered to what may be written, and the reasons the rest must be
+ * refused: a file that shrank to a fragment (the model returned part of a file as the whole), or
+ * JSON that does not parse. Returned problems are written for the model's next attempt.
+ */
+export function checkCoderFiles(cfg: Pick<Config, "repo">, step: PlanStep, files: CoderOutput["files"]): { files: CoderOutput["files"]; problems: string[] } {
   const allowed = new Set(step.files.map((f) => f.path));
-  const written: CoderOutput["files"] = [];
-  for (const f of out.files) {
+  const out: CoderOutput["files"] = [];
+  const problems: string[] = [];
+  for (const f of files) {
     if (!allowed.has(f.path)) {
       log(`  coder tried to write ${f.path}, not in the allowed list; ignored`);
       continue;
@@ -100,9 +118,46 @@ export async function runCoder(cfg: Config, step: PlanStep, round: CoderRound, a
       log(`  coder returned empty content for ${f.path}; ignored`);
       continue;
     }
-    writeFile(cfg.repo, f.path, f.content.endsWith("\n") ? f.content : f.content + "\n");
-    written.push(f);
+    const old = fileExists(cfg.repo, f.path) ? readFile(cfg.repo, f.path) : "";
+    if (old.length > 2000 && f.content.length < old.length * 0.4) {
+      problems.push(`Your content for ${f.path} is ${f.content.length} characters but the file is ${old.length}: you returned a fragment. Return the COMPLETE file with your change applied, or change nothing in it.`);
+      continue;
+    }
+    if (/\.json$/.test(f.path)) {
+      try {
+        JSON.parse(f.content);
+      } catch (e) {
+        problems.push(`${f.path} is not valid JSON (${(e as Error).message}). Return the complete, valid file.`);
+        continue;
+      }
+    }
+    out.push(f);
   }
-  log(`  coder wrote ${written.length} file(s): ${written.map((f) => f.path).join(", ") || "none"}`);
-  return { files: written, explanation: out.explanation };
+  return { files: out, problems };
+}
+
+/** Files a step marks executable get mode 755; models cannot chmod, so the pipeline does it after every write. */
+export function applyModes(repo: string, step: PlanStep): string[] {
+  const done: string[] = [];
+  for (const f of step.files) {
+    if (!f.executable) continue;
+    const p = safePath(repo, f.path);
+    if (!existsSync(p)) continue;
+    chmodSync(p, 0o755);
+    done.push(f.path);
+  }
+  return done;
+}
+
+/**
+ * Whether a writable file is too large for the local model, which must return every file whole
+ * and cannot hold one this size in its context window. Such steps skip the local attempts.
+ */
+export function tooBigForLocal(cfg: Pick<Config, "repo" | "limits">, step: PlanStep): string | null {
+  for (const f of step.files) {
+    if (!fileExists(cfg.repo, f.path)) continue;
+    const n = readFile(cfg.repo, f.path).length;
+    if (n > cfg.limits.coderMaxFileChars) return `${f.path} is ${n} characters, over the ${cfg.limits.coderMaxFileChars} the local coder can rewrite whole`;
+  }
+  return null;
 }

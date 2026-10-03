@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, 
 import path from "node:path";
 import { recordProposals } from "./actions.ts";
 import { loadConfig } from "./config.ts";
-import { currentProject, dataDir, isRunnable, loadGlobalConfig, worktreeRoot, type GlobalConfig, type ProjectConfig } from "./global.ts";
+import { currentProject, dataDir, isRunnable, loadGlobalConfig, projectStatus, worktreeRoot, type GlobalConfig, type ProjectConfig } from "./global.ts";
 import { notify } from "./notify.ts";
 import { createProject, queueStreamStart } from "./projects.ts";
 import { loadRegistry, type AgentManifest, type Registry } from "./registry.ts";
@@ -10,6 +10,7 @@ import { ensureIgnored, excludeAgentpipeDir } from "./repo.ts";
 import type { ProjectSpec, Subtask } from "./result.ts";
 import { runAgent, type AgentRunContext, type RunOutcome } from "./runner.ts";
 import { TERMINAL_STATUSES, type Store, type Task } from "./store.ts";
+import { addUpstream, UPSTREAM_DIR } from "./upstreams.ts";
 import { BudgetExceeded, clip, log, setLogFile, sh, withRunContext } from "./util.ts";
 
 /**
@@ -129,7 +130,12 @@ export async function runWorker(store: Store, gcfg: GlobalConfig, opts: WorkerOp
           }
         }
         const runnable = Object.entries(g.projects).filter(([, p]) => isRunnable(p)).map(([n]) => n);
-        const task = store.claimNext({ project: opts.project, projects: runnable, prefer: currentProject(g), agents: overBudget ? agents.free : agents.all, lane });
+        // A project with its own daily cap that it has reached only runs agents that do not spend.
+        const overOwn = new Set(runnable.filter((n) => (g.projects[n].dailyUsd ?? 0) > 0 && store.spendToday(n) >= g.projects[n].dailyUsd!));
+        const withinBudget = runnable.filter((n) => !overOwn.has(n));
+        const task =
+          store.claimNext({ project: opts.project, projects: withinBudget, prefer: currentProject(g), agents: overBudget ? agents.free : agents.all, lane }) ??
+          (overOwn.size ? store.claimNext({ project: opts.project, projects: [...overOwn], prefer: currentProject(g), agents: agents.free, lane }) : null);
         if (!task) {
           if (opts.once) return;
           await sleep(gcfg.worker.pollSec * 1000);
@@ -204,7 +210,37 @@ async function processTask(store: Store, gcfg: GlobalConfig, task: Task) {
     // With subtasks the task goes to waiting, not attention, so finish() would not tell anyone.
     void notify(gcfg, { kind: "attention", title: `agentpipe: #${task.id} created a project that needs you`, body: `${task.title}\n\nagentpipe show ${task.id}` });
   }
+  if (outcome?.result.upstreams?.length) await fetchRequestedUpstreams(store, task, outcome.result.upstreams, outcome);
   finish(store, gcfg, task, outcome, error, registry);
+}
+
+/**
+ * Upstream repositories an agent asked for in its own project. Fetching is a read, so it happens
+ * at once; a failed fetch turns the task into attention with the reason, since the plan that
+ * follows will depend on the files being there.
+ */
+export async function fetchRequestedUpstreams(store: Store, task: Task, specs: import("./result.ts").UpstreamSpec[], outcome: Pick<RunOutcome, "result" | "verification">): Promise<boolean> {
+  const { result } = outcome;
+  if (result.status !== "done" || !outcome.verification.ok) {
+    result.summary += `\n\n## Upstreams not fetched\nThe task did not finish cleanly, so ${specs.map((u) => u.repo).join(", ")} were not fetched.`;
+    return false;
+  }
+  const lines: string[] = [];
+  let failed = false;
+  for (const u of specs) {
+    try {
+      const r = await addUpstream(task.project, u);
+      lines.push(`- ${r.note}${u.why ? ` (${u.why})` : ""}`);
+      store.event(task.id, "upstream", r.note);
+    } catch (e) {
+      failed = true;
+      lines.push(`- **${u.repo} NOT fetched:** ${(e as Error).message}`);
+      store.event(task.id, "warning", `upstream ${u.repo} not fetched: ${(e as Error).message}`);
+    }
+  }
+  result.summary += `\n\n## Upstream repositories\n${lines.join("\n")}`;
+  if (failed) result.status = "attention";
+  return !failed;
 }
 
 /**
@@ -223,7 +259,7 @@ export async function createProposedProjects(store: Store, task: Task, specs: Pr
   let needsHuman = false;
   for (const spec of specs) {
     try {
-      const created = await createProject(spec, { allowRemote: false });
+      const created = await createProject(spec, { allowRemote: false, createdByTask: task.id });
       const first = queueStreamStart(store, created, spec, `agent:${task.agent}#${task.id}`);
       lines.push(`### ${created.name}`, ...created.notes.map((n) => `- ${n}`), ...first.map((t) => `- queued #${t.id} [${t.agent}] ${t.title}${created.pending.length ? " (runs after approval)" : ""}`));
       store.event(task.id, "project", `created project ${created.name} at ${created.project.path}${created.pending.length ? `, held for approval: ${created.pending.map((p) => p.command).join("; ")}` : ""}`);
@@ -294,7 +330,8 @@ async function prepareWorktree(store: Store, gcfg: GlobalConfig, name: string, p
   if (!add.ok) throw new Error(`git worktree add failed: ${add.output.trim().slice(0, 300)}`);
 
   const linked: string[] = [];
-  for (const entry of project.link ?? gcfg.worktrees.link) {
+  const links = [...(project.link ?? gcfg.worktrees.link), ...(project.upstreams && Object.keys(project.upstreams).length ? [UPSTREAM_DIR] : [])];
+  for (const entry of links) {
     const src = path.join(main, entry);
     const dst = path.join(dir, entry);
     if (existsSync(src) && !existsSync(dst)) {
@@ -357,7 +394,13 @@ function finish(store: Store, gcfg: GlobalConfig, task: Task, outcome: RunOutcom
     if (status !== "queued") store.settleParent(task.id);
   } else {
     const { result } = outcome;
-    const created = createSubtasks(store, gcfg, task, result.subtasks, registry);
+    // A plan whose verification failed is not a plan: its subtasks are listed, not created, and
+    // the agent sees the problems on its next run.
+    let created: Task[] = [];
+    if (result.subtasks.length && !outcome.verification.ok) {
+      store.event(task.id, "warning", `${result.subtasks.length} subtask(s) not created because output verification failed; fix the plan (reply or retry) to create them`);
+      result.summary += `\n\n## Subtasks not created (output verification failed)\n${result.subtasks.map((s, i) => `${i}. [${s.agent}] ${s.title}`).join("\n")}`;
+    } else created = createSubtasks(store, gcfg, task, result.subtasks, registry);
     // Agents the agent wished it had: recorded for the human, never created here.
     const proposed = recordProposals(store, result.agent_proposals, { task, project: task.project, by: `agent:${task.agent}#${task.id}` });
     if (proposed.length) result.summary += `\n\n## Agents proposed\n${proposed.join("\n")}`;
@@ -425,13 +468,23 @@ export function createSubtasks(store: Store, gcfg: GlobalConfig, parent: Task, s
   if (subtasks.length > wanted.length) store.event(parent.id, "limit", `agent proposed ${subtasks.length} subtasks; capped at ${gcfg.architect.maxSubtasks}`);
   const ids: (number | null)[] = [];
   const created: Task[] = [];
+  const registries = new Map<string, Registry>([[parent.project, reg]]);
   for (const [i, s] of wanted.slice(0, room).entries()) {
-    if (!reg.agents.has(s.agent)) {
-      store.event(parent.id, "warning", `subtask ${i} "${s.title}" names unknown agent "${s.agent}"; skipped`);
+    // A subtask may belong to another stream (one this task created, say); it must exist and run.
+    const project = s.project ?? parent.project;
+    const pcfg = gcfg.projects[project];
+    if (!pcfg || projectStatus(pcfg) === "archived") {
+      store.event(parent.id, "warning", `subtask ${i} "${s.title}" names project "${project}", which is ${pcfg ? "archived" : "not registered"}; skipped`);
       ids.push(null);
       continue;
     }
-    const dup = store.findDuplicate(parent.project, s.agent, s.title);
+    if (!registries.has(project)) registries.set(project, loadRegistry(pcfg));
+    if (!registries.get(project)!.agents.has(s.agent)) {
+      store.event(parent.id, "warning", `subtask ${i} "${s.title}" names unknown agent "${s.agent}"${project !== parent.project ? ` (in ${project})` : ""}; skipped`);
+      ids.push(null);
+      continue;
+    }
+    const dup = store.findDuplicate(project, s.agent, s.title);
     if (dup) {
       store.event(parent.id, "warning", `subtask ${i} "${s.title}" duplicates open task #${dup.id}; skipped`);
       ids.push(dup.id);
@@ -439,7 +492,7 @@ export function createSubtasks(store: Store, gcfg: GlobalConfig, parent: Task, s
     }
     const deps = (s.after ?? []).filter((j) => j >= 0 && j < i && ids[j] !== null).map((j) => ids[j]!);
     const t = store.add({
-      project: parent.project,
+      project,
       agent: s.agent,
       title: s.title,
       description: s.description,
@@ -454,7 +507,7 @@ export function createSubtasks(store: Store, gcfg: GlobalConfig, parent: Task, s
     ids.push(t.id);
     created.push(t);
   }
-  if (created.length) store.event(parent.id, "subtasks", created.map((t) => `#${t.id} [${t.agent}] ${t.title}`).join("; "));
+  if (created.length) store.event(parent.id, "subtasks", created.map((t) => `#${t.id} [${t.agent}]${t.project !== parent.project ? ` (${t.project})` : ""} ${t.title}`).join("; "));
   return created;
 }
 

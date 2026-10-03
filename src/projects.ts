@@ -4,6 +4,7 @@ import path from "node:path";
 import { currentProject, expandHome, loadGlobalConfig, projectStatus, updateGlobalConfig, type GlobalConfig, type PendingStep, type ProjectConfig } from "./global.ts";
 import type { ProjectSpec } from "./result.ts";
 import type { Store, Task } from "./store.ts";
+import { addUpstream } from "./upstreams.ts";
 import { log, sh } from "./util.ts";
 
 /**
@@ -55,8 +56,12 @@ function isEmptyDir(dir: string): boolean {
   return !existsSync(dir) || readdirSync(dir).length === 0;
 }
 
-/** Create a project from a spec and register it. Throws (having registered nothing) when a local step fails. */
-export async function createProject(spec: ProjectSpec, opts: { allowRemote: boolean }): Promise<Created> {
+/**
+ * Create a project from a spec and register it. Throws (having registered nothing) when a local
+ * step fails. Upstream repositories named in the spec are fetched right after registration (a
+ * read: no approval); a failed fetch is reported in the notes, not fatal.
+ */
+export async function createProject(spec: ProjectSpec, opts: { allowRemote: boolean; createdByTask?: number }): Promise<Created> {
   const g = loadGlobalConfig();
   if (g.projects[spec.name]) throw new Error(`project "${spec.name}" already exists (${g.projects[spec.name].path})`);
   const notes: string[] = [];
@@ -135,6 +140,7 @@ export async function createProject(spec: ProjectSpec, opts: { allowRemote: bool
 
   project.goal = spec.goal;
   project.created = new Date().toISOString();
+  if (opts.createdByTask) project.createdByTask = opts.createdByTask;
   if (pending.length && opts.allowRemote) {
     for (const step of pending.splice(0)) {
       await run(step.command, step.cwd, 600);
@@ -153,6 +159,15 @@ export async function createProject(spec: ProjectSpec, opts: { allowRemote: bool
   if (makeCurrent) notes.push(`${spec.name} is now the current project`);
   if (pending.length) notes.push(`held until approved: ${pending.map((p) => p.command).join("; ")} (agentpipe projects approve ${spec.name})`);
   log(`projects: created ${spec.name} (${spec.kind}) at ${project.path}, base ${project.base}`);
+  for (const u of spec.upstreams ?? []) {
+    try {
+      const r = await addUpstream(spec.name, u);
+      notes.push(r.note);
+    } catch (e) {
+      notes.push(`upstream ${u.repo} NOT fetched: ${(e as Error).message}`);
+    }
+  }
+  project = loadGlobalConfig().projects[spec.name] ?? project;
   // A branch stream shares its parent's repository setup; setting it up is the parent's business.
   const needsSetup = !project.parent && !existsSync(path.join(project.path, "agentpipe.json"));
   if (project.parent && !existsSync(path.join(project.path, "agentpipe.json"))) notes.push(`note: ${project.parent} has no agentpipe.json; agents use the default commands until it gets one`);
@@ -194,8 +209,12 @@ export function queueStreamStart(store: Store, created: Created, spec: ProjectSp
   return out;
 }
 
-/** Run a held project's pending remote steps in order. Stops at the first failure; what ran is not repeated. */
-export async function approvePending(name: string): Promise<string[]> {
+/**
+ * Run a held project's pending remote steps in order. Stops at the first failure; what ran is not
+ * repeated. When every step succeeded, the task that created the stream (if it is still waiting
+ * for this) is closed: the stream exists, and its own queue carries the work from here.
+ */
+export async function approvePending(name: string, store?: Store): Promise<string[]> {
   const g = loadGlobalConfig();
   const p = g.projects[name];
   if (!p) throw new Error(`unknown project "${name}"`);
@@ -217,6 +236,15 @@ export async function approvePending(name: string): Promise<string[]> {
     });
   }
   out.push(`${name} approved; its tasks will run`);
+  if (store && p.createdByTask) {
+    const t = store.get(p.createdByTask);
+    if (t && t.status === "attention" && t.confirmation?.status !== "pending") {
+      store.setStatus(t.id, "done", `stream ${name} approved; its own queue carries the work from here`);
+      store.update(t.id, { triaged: 1, error: null });
+      store.settleParent(t.id);
+      out.push(`#${t.id} (the task that created ${name}) is done; the stream's own tasks take it from here`);
+    }
+  }
   return out.filter(Boolean);
 }
 
@@ -242,7 +270,8 @@ export function renderProjects(gcfg: GlobalConfig, store?: Store): string {
     const c = store?.counts(n);
     const open = store ? store.openCount(n) : null;
     const state = p.pending?.length ? "held for approval" : projectStatus(p);
-    return `- ${n}${n === cur ? " (current)" : ""} [${state}]: ${p.path}, ${p.parent ? `branch ${p.base} of ${p.parent}` : `base ${p.base}`}${p.repo ? `, GitHub ${p.repo}` : ""}${p.push ? ", opens PRs" : ""}${open !== null ? `; ${open} open, ${c!.done} done` : ""}${p.goal ? `\n  goal: ${p.goal.replace(/\s+/g, " ")}` : ""}`;
+    const ups = Object.entries(p.upstreams ?? {}).map(([k, u]) => `upstream/${k} = ${u.repo}`).join(", ");
+    return `- ${n}${n === cur ? " (current)" : ""} [${state}]: ${p.path}, ${p.parent ? `branch ${p.base} of ${p.parent}` : `base ${p.base}`}${p.repo ? `, GitHub ${p.repo}` : ""}${p.push ? ", opens PRs" : ""}${open !== null ? `; ${open} open, ${c!.done} done` : ""}${ups ? `; ${ups}` : ""}${p.goal ? `\n  goal: ${p.goal.replace(/\s+/g, " ")}` : ""}`;
   });
   return rows.join("\n") || "(no projects)";
 }

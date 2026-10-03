@@ -14,6 +14,7 @@ import { AgentResult, Subtask } from "./result.ts";
 import { checkCommand, hookSettings, toolsForGroups } from "./shell-policy.ts";
 import type { Store, Task } from "./store.ts";
 import { formatFailures, runFastChecks } from "./tests.ts";
+import { renderUpstreams } from "./upstreams.ts";
 import { clip, log, nowStamp, setLogFile, setRunDir, sh, slug } from "./util.ts";
 import { runVerifier, type VerifyContext } from "./verify.ts";
 
@@ -104,6 +105,8 @@ function renderTask(task: Task, ctx: AgentRunContext, manifest: AgentManifest, d
   lines.push("", `# Project`, `${describeStream(ctx.projectName, ctx.project)}`, `You are working on ${ctx.startBranch}${task.branch && task.branch !== ctx.startBranch ? ` (task branch ${task.branch})` : ""}.`, `Stack: ${repoStack(ctx.cfg.repo)}.`);
   const notes = projectNotes(ctx.cfg.repo);
   if (notes) lines.push("", "## Project notes for agents (AGENTPIPE.md)", notes);
+  const upstreams = renderUpstreams(ctx.project);
+  if (upstreams) lines.push("", upstreams);
   if (task.parent_id) {
     const parent = ctx.store.get(task.parent_id);
     if (parent) lines.push("", `This is a subtask of #${parent.id} "${parent.title}".`);
@@ -174,7 +177,9 @@ const DELEGATION_RULES = `# How delegation works
 - Each subtask becomes an independent queue item run later, in dependency order, in its own worktree. The agent sees only the subtask's title, description, acceptance criteria, files and branch: write descriptions a newcomer could act on without your context.
 - Every subtask needs acceptance criteria: short checkable statements (which file exists, which test passes, which behaviour holds). The agent works to them, its verifier reads them, and the architect's review judges by them.
 - A coder-type task turns into its own branch and pull request off the base branch. A task that needs another task's code must list it in "after"; it is then stacked on that task's branch (its PR targets that branch). Prefer independent tasks; use "after" only for real code dependencies.
-- Size coder tasks for a 7B local model guided by a planner: one concern, a handful of small files, tests included. Split anything larger.
+- Size coder tasks for a 7B local model guided by a planner: one concern, a handful of small files, tests included. Split anything larger. A file over about 20,000 characters is edited by the cloud fixer instead; say so in the task and keep such steps few.
+- A subtask lands in this project unless it names another registered "project" (a stream this task created, for instance); its agent must exist there.
+- Other repositories the project works from are read-only copies under upstream/<name>/ (listed above when there are any). Claude agents read PDFs and images there with the Read tool. Copying files from an upstream into the project is the upstream-importer agent's job (a JSON spec in the task); fetching a new upstream is for agents that may create projects.
 - Reviewers and testers run after the code they examine: list the coder task in "after" and let the worker pass its branch along.
 - Commands outside an agent's shell groups are refused. Work that needs other commands (installs, builds, scripted checks) goes to the shell-runner agent as its own subtask, with the exact command and why.
 - Agents marked "asks the human to approve exact steps" may do what the others may not (GitHub writes, installing a new agent): they propose the steps, the human approves on the status page, code runs them. Delegate such work to them with a complete specification instead of raising it as a question in attention.
@@ -204,52 +209,67 @@ Ground rules:
 - Do not run git commands that change state, do not push, do not merge; the worker owns branches, commits and pull requests.`;
 
 async function claudeRuntime(task: Task, ctx: AgentRunContext, manifest: AgentManifest): Promise<AgentResult> {
-  const prompt = await buildPrompt(task, ctx, manifest);
+  const basePrompt = await buildPrompt(task, ctx, manifest);
   const groups = [...manifest.shell, ...(manifest.commits && !manifest.shell.includes("checks") ? ["checks"] : [])];
   const cmds = projectCommands(ctx.cfg);
   const tools = new Set<string>([...READ_ONLY_TOOLS, ...manifest.tools, ...toolsForGroups(groups, cmds)]);
   if (manifest.commits) for (const t of ["Edit", "Write", "MultiEdit"]) tools.add(t);
   const names = manifest.can_delegate ? delegateTargets(ctx.registry, manifest.name) : [];
-  const run = await runClaude(ctx.cfg, {
-    cwd: ctx.cfg.repo,
-    prompt,
-    systemAppend:
-      manifest.prompt +
-      (manifest.commits ? `\n\nYou may edit files${manifest.paths.length ? ` matching: ${manifest.paths.join(", ")}` : ""}. Do not run git commit/push; the worker commits, tests and opens the pull request. Do not modify screenshot baselines.` : "\n\nYou are read-only: do not modify files.") +
-      SAFETY_FOOTER +
-      `\nYour shell groups: ${groups.length ? groups.join(", ") : "none (no shell access)"}.`,
-    allowedTools: [...tools],
-    permissionMode: manifest.commits ? "acceptEdits" : "dontAsk",
-    maxTurns: manifest.max_turns,
-    jsonSchema: schemaWithAgents(manifest, names),
-    timeoutSec: manifest.timeout_sec,
-    model: manifest.model || undefined,
-    settings: hookSettings(groups, cmds),
-    label: `${manifest.name} #${task.id}`,
-  });
-  const raw = run.structured ?? tryParseJson(run.result);
-  if (!raw) return { status: "attention", summary: `Agent returned no structured result. Raw reply:\n\n${clip(run.result, 6000)}`, findings: [], subtasks: [] };
-  const res = AgentResult.parse(raw);
-  if (!manifest.can_delegate) {
-    res.subtasks = [];
-    delete res.agent_proposals;
-  }
-  if (!manifest.can_create_projects) delete res.projects;
-  if (!manifest.requires_confirmation) delete res.confirmation;
-  else if (res.confirmation) {
-    // A request is shown to the human only when it is clean; otherwise the agent hears why and can try again.
-    const problems = validateConfirmation(res.confirmation, ctx.project);
-    if (problems.length) {
-      res.summary += `\n\n## Confirmation request refused\nThe steps were not shown to the human:\n${problems.map((p) => "- " + p).join("\n")}`;
-      res.findings.push(...problems.map((p) => ({ severity: "blocker" as const, description: `confirmation request: ${p}` })));
-      delete res.confirmation;
-      if (res.status !== "failed") res.status = "attention";
-    } else {
-      res.status = "attention";
+  // A confirmation request with a refused step is sent back to the agent once, in this same run,
+  // instead of costing a human round: the first refusal of this kind threw away a whole request
+  // (and a day) over one `find -exec`.
+  let refused: string[] = [];
+  for (let round = 1; ; round++) {
+    const prompt = refused.length ? `${basePrompt}\n\n# Your confirmation request was refused by the policy check\nThe steps were not shown to the human because:\n${refused.map((p) => "- " + p).join("\n")}\nRewrite the request without those constructs (every other step was fine) and answer again. If a step cannot be expressed within the rules, leave it out and say so in the summary.` : basePrompt;
+    const run = await runClaude(ctx.cfg, {
+      cwd: ctx.cfg.repo,
+      prompt,
+      systemAppend:
+        manifest.prompt +
+        (manifest.commits ? `\n\nYou may edit files${manifest.paths.length ? ` matching: ${manifest.paths.join(", ")}` : ""}. Do not run git commit/push; the worker commits, tests and opens the pull request. Do not modify screenshot baselines.` : "\n\nYou are read-only: do not modify files.") +
+        SAFETY_FOOTER +
+        `\nYour shell groups: ${groups.length ? groups.join(", ") : "none (no shell access)"}.`,
+      allowedTools: [...tools],
+      permissionMode: manifest.commits ? "acceptEdits" : "dontAsk",
+      maxTurns: manifest.max_turns,
+      jsonSchema: schemaWithAgents(manifest, names),
+      timeoutSec: manifest.timeout_sec,
+      model: manifest.model || undefined,
+      settings: hookSettings(groups, cmds),
+      label: `${manifest.name} #${task.id}${round > 1 ? " (retry after a refused request)" : ""}`,
+    });
+    const raw = run.structured ?? tryParseJson(run.result);
+    if (!raw) return { status: "attention", summary: `Agent returned no structured result. Raw reply:\n\n${clip(run.result, 6000)}`, findings: [], subtasks: [] };
+    const res = AgentResult.parse(raw);
+    if (!manifest.can_delegate) {
       res.subtasks = [];
+      delete res.agent_proposals;
     }
+    if (!manifest.can_create_projects) {
+      delete res.projects;
+      delete res.upstreams;
+    }
+    if (!manifest.requires_confirmation) delete res.confirmation;
+    else if (res.confirmation) {
+      // A request is shown to the human only when it is clean; otherwise the agent hears why: once in this run, then on its next.
+      const problems = validateConfirmation(res.confirmation, ctx.project);
+      if (problems.length && round === 1) {
+        log(`  confirmation request refused (${problems.length} problem(s)); asking the agent to rewrite it`);
+        refused = problems;
+        continue;
+      }
+      if (problems.length) {
+        res.summary += `\n\n## Confirmation request refused\nThe steps were not shown to the human:\n${problems.map((p) => "- " + p).join("\n")}`;
+        res.findings.push(...problems.map((p) => ({ severity: "blocker" as const, description: `confirmation request: ${p}` })));
+        delete res.confirmation;
+        if (res.status !== "failed") res.status = "attention";
+      } else {
+        res.status = "attention";
+        res.subtasks = [];
+      }
+    }
+    return res;
   }
-  return res;
 }
 
 async function ollamaRuntime(task: Task, ctx: AgentRunContext, manifest: AgentManifest): Promise<AgentResult> {

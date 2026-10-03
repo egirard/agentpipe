@@ -114,9 +114,15 @@ export async function sh(cmd: string, cwd: string, timeoutSec: number, env: Reco
   return { ok: code === 0 && !timedOut, code, output, timedOut, seconds: (Date.now() - start) / 1000 };
 }
 
+/**
+ * Remove terminal escape sequences from command output. Only real escapes (ESC followed by a CSI
+ * sequence) are removed: a bare `[` followed by letters is ordinary text, and stripping it would
+ * corrupt diffs (`[sveltekit()]` became `veltekit()]`, `[main]` became `ain]`) before the
+ * reviewer and the fixer ever saw them.
+ */
 export function stripAnsi(s: string): string {
   // eslint-disable-next-line no-control-regex
-  return s.replace(/\[[0-9;?]*[a-zA-Z]/g, "");
+  return s.replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, "").replace(/\x1b[@-Z\\-_]/g, "");
 }
 
 /** Keep the head and tail of long output; models care about the last errors most. */

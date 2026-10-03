@@ -137,3 +137,17 @@ describe("write API", () => {
     expect(d.report).toContain("all good");
   });
 });
+
+describe("edit API", () => {
+  test("edits a task's text and returns the refreshed detail", async () => {
+    const t = store.add({ project: "demo", agent: "coder", title: "x", description: "clone into /tmp" });
+    const r = await (await post(`/api/task/${t.id}/edit`, { description: "read upstream/tt", acceptance: "a\nb", priority: "5" })).json();
+    expect(r.ok).toBe(true);
+    expect(r.task.priority).toBe(5);
+    expect(r.task.title).toBe("x");
+    expect(r.events.some((e: any) => e.kind === "edited")).toBe(true);
+    expect(store.get(t.id)!.description).toBe("read upstream/tt");
+    expect(store.get(t.id)!.acceptance).toEqual(["a", "b"]);
+    expect((await post(`/api/task/${t.id}/edit`, { agent: "unicorn" })).status).toBe(400);
+  });
+});

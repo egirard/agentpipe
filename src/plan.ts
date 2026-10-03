@@ -14,9 +14,10 @@ export const PlanStep = z.object({
       z.object({
         path: z.string().describe("Repo-relative path."),
         action: z.enum(["create", "modify"]),
+        executable: z.boolean().optional().describe("true for scripts and git hooks: the pipeline sets mode 755 after the file is written (models cannot chmod)."),
       }),
     )
-    .describe("Files the coder is allowed to write. Keep to 1-3 small files per step."),
+    .describe("Files the coder is allowed to write. Keep to 1-3 small files per step. A file larger than the local model's context cannot be rewritten by it: such steps go straight to the cloud fixer."),
   context_files: z.array(z.string()).describe("Read-only files the coder needs to see (types, siblings, an example test). Keep small."),
   acceptance: z.array(z.string()).describe("Checkable statements a reviewer can verify from the diff."),
   unit_tests: z.array(z.string()).describe("Vitest files to run for this step (existing or ones this step creates). Empty = whole unit suite."),

@@ -272,3 +272,26 @@ describe("confirmations", () => {
     await expect(approveTask(store, g(), t3.id, "me")).rejects.toThrow(/refused/);
   });
 });
+
+describe("editTask", () => {
+  test("changes title, description, acceptance, agent and priority, records an event, refuses a running task", async () => {
+    const { editTask } = await import("./actions.ts");
+    const g = loadGlobalConfig();
+    const t = store.add({ project: "demo", agent: "coder", title: "old", description: "clone it into /tmp", acceptance: ["a"] });
+    const e = editTask(store, g, t.id, { description: "read upstream/tt instead", acceptance: ["a", " b ", ""], agent: "docs-writer", priority: 7 }, "cli");
+    expect(e.description).toBe("read upstream/tt instead");
+    expect(e.acceptance).toEqual(["a", "b"]);
+    expect(e.agent).toBe("docs-writer");
+    expect(e.priority).toBe(7);
+    expect(e.title).toBe("old");
+    const ev = store.events(t.id).find((x) => x.kind === "edited")!;
+    expect(ev.message).toContain("description, acceptance, agent coder -> docs-writer, priority 50 -> 7");
+    expect(editTask(store, g, t.id, { title: "old", description: "   " }, "cli").description).toBe("read upstream/tt instead");
+    expect(store.events(t.id).filter((x) => x.kind === "edited").length).toBe(1);
+    expect(() => editTask(store, g, t.id, { agent: "unicorn" }, "cli")).toThrow(/unicorn/);
+    expect(() => editTask(store, g, t.id, { priority: 0 }, "cli")).toThrow(/priority/);
+    store.setStatus(t.id, "running");
+    expect(() => editTask(store, g, t.id, { title: "x" }, "cli")).toThrow(/running/);
+    expect(() => editTask(store, g, 999, { title: "x" }, "cli")).toThrow(/#999/);
+  });
+});

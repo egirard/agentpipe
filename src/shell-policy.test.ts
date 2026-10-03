@@ -59,3 +59,27 @@ describe("approved commands", () => {
     expect(checkApprovedCommand("systemctl --user restart agentpipe-worker").ok).toBe(false);
   });
 });
+
+describe("policy changes after the Nile1978 run", () => {
+  test("find -exec is not indirect execution; eval, exec and source as commands still are", () => {
+    const g = ["ops", "git-read"];
+    expect(checkCommand("find upstream/tt -type f -exec file {} +", g).ok).toBe(true);
+    for (const c of ["exec bash", "ls; exec sh", "eval ls", "source x.sh", "ls && source ~/.bashrc", "bash -c ls", "ls | xargs rm"]) expect(checkCommand(c, g).ok).toBe(false);
+  });
+  test("git -C inside the checkout reads; outside, with .., or writing is refused", () => {
+    expect(checkCommand("git -C upstream/tt log --oneline -3", ["git-read"]).ok).toBe(true);
+    expect(checkCommand("git -C upstream/tt rev-parse HEAD", ["git-read"]).ok).toBe(true);
+    expect(checkCommand("git -C upstream/tt branch -a", ["git-read"]).ok).toBe(true);
+    for (const c of ["git -C /home/x/.cache log", "git -C ~/src/x log", "git -C ../x log", "git -C upstream/../../x log", "git -C upstream/tt push", "git -C upstream/tt checkout main", "git -C upstream/tt commit -m x"]) expect(checkCommand(c, ["git-read", "ops"]).ok).toBe(false);
+  });
+  test("chmod +x on one file in the checkout is allowed through checks; anything else chmod is denied", () => {
+    expect(checkCommand("chmod +x scripts/verify-change.sh", ["checks"]).ok).toBe(true);
+    expect(checkCommand("chmod 755 .husky/pre-commit", ["checks"]).ok).toBe(true);
+    for (const c of ["chmod 777 x", "chmod -R +x .", "chmod +x /etc/passwd", "chmod +x ../x", "find . -exec chmod 777 {} +", "find . -exec chmod +x {} +", "chmod +x a b"]) expect(checkCommand(c, ["ops", "checks"]).ok).toBe(false);
+  });
+  test("a shell agent's own script is allowed under ops", () => {
+    expect(checkCommand('bun "$AGENTPIPE_AGENT_DIR/import.ts"', ["ops"]).ok).toBe(true);
+    expect(checkCommand("bun $AGENTPIPE_AGENT_DIR/import.ts", ["ops"]).ok).toBe(true);
+    expect(checkCommand("bun /tmp/x.ts", ["ops"]).ok).toBe(false);
+  });
+});

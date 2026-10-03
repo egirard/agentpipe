@@ -4,7 +4,7 @@ import { architectPlan, architectReplan, cloudFinalReview, cloudFix } from "./cl
 import type { Config } from "./config.ts";
 import type { Plan, PlanStep } from "./plan.ts";
 import { commitAll, createBranch, createPullRequest, currentBranch, diffSince, diffStat, ensureClean, excludeAgentpipeDir, headSha, pushBranch, runsRoot } from "./repo.ts";
-import { runCoder } from "./stages/coder.ts";
+import { applyModes, runCoder, tooBigForLocal } from "./stages/coder.ts";
 import { formatIssues, runReviewer } from "./stages/reviewer.ts";
 import { failures, formatFailures, runE2e, runFastChecks, runFullUnit, type CheckResult } from "./tests.ts";
 import { clip, log, nowStamp, setLogFile, setRunDir, sh, slug } from "./util.ts";
@@ -208,7 +208,16 @@ async function runStep(cfg: Config, step: PlanStep): Promise<StepReport> {
     return sr;
   }
 
-  for (let attempt = 1; attempt <= cfg.limits.localAttempts && !green; attempt++) {
+  // A file the local model cannot hold whole is not worth three attempts: the cloud fixer edits it in place.
+  const big = tooBigForLocal(cfg, step);
+  if (big) {
+    log(`  skipping the local coder: ${big}`);
+    sr.notes.push(`local coder skipped: ${big}`);
+  }
+  const localAttempts = big ? 0 : cfg.limits.localAttempts;
+  let reviewSendbacks = 0;
+
+  for (let attempt = 1; attempt <= localAttempts && !green; attempt++) {
     sr.attempts = attempt;
     const rec: StepAttempt = { n: attempt, actor: "coder", filesWritten: [], explanation: "", checks: [] };
     sr.history.push(rec);
@@ -247,7 +256,14 @@ async function runStep(cfg: Config, step: PlanStep): Promise<StepReport> {
     const blocking = review.issues.filter((i) => i.severity !== "minor");
     if (review.approved || blocking.length === 0) {
       green = true;
+    } else if (reviewSendbacks >= 1) {
+      // The local reviewer is the same small model as the coder and is often wrong about code
+      // that lint and the tests accept. It may send a step back once; after that, green checks
+      // win and the final cloud review sees the disputed diff anyway.
+      green = true;
+      sr.notes.push(`review round ${attempt}: ${review.summary} (disputed twice with lint and tests green; accepted, left to the final review)`);
     } else {
+      reviewSendbacks++;
       reviewIssues = formatIssues(review);
       feedback = undefined;
       sr.notes.push(`review round ${attempt}: ${review.summary}`);
@@ -259,7 +275,8 @@ async function runStep(cfg: Config, step: PlanStep): Promise<StepReport> {
     const rec: StepAttempt = { n: sr.history.length + 1, actor: "fixer", filesWritten: [], explanation: "", checks: [] };
     sr.history.push(rec);
     try {
-      const fix = await cloudFix(cfg, step, diff, lastChecks);
+      const fix = await cloudFix(cfg, step, diff, lastChecks, big ? `The local model was not tried: ${big}. Make the change yourself with the Edit tool.` : undefined);
+      applyModes(cfg.repo, step);
       rec.explanation = fix.summary;
       rec.checks = fix.lastChecks;
       rec.filesWritten = (await sh(`git diff --name-only ${JSON.stringify(stepBase)}`, cfg.repo, 30)).output.trim().split("\n").filter(Boolean);
@@ -277,6 +294,8 @@ async function runStep(cfg: Config, step: PlanStep): Promise<StepReport> {
   }
 
   if (green) {
+    const modes = applyModes(cfg.repo, step);
+    if (modes.length) log(`  made executable: ${modes.join(", ")}`);
     sr.commit = await commitAll(cfg.repo, `${step.title}\n\n${step.description.slice(0, 800)}\n\n[agentpipe ${sr.status}, ${sr.attempts} local attempt(s)]`);
     log(`  committed ${sr.commit ?? "(nothing)"}`);
     if (cfg.runE2e && step.e2e_specs.length) {

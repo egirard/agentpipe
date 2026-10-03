@@ -18,8 +18,22 @@ export const Subtask = z.object({
   after: z.array(z.number().int().min(0)).optional().describe("0-based indexes of subtasks in this list that must finish (done) first. Their branch becomes this task's starting point."),
   files: z.array(z.string()).optional().describe("Repo-relative files the agent should look at first."),
   branch: z.string().optional().describe("For review agents: an existing branch to examine."),
+  project: z.string().optional().describe("Another registered project (stream) to queue this subtask in, when the work belongs there: for example a stream this task just created. Default: the current project."),
 });
 export type Subtask = z.infer<typeof Subtask>;
+
+/**
+ * A repository to fetch read-only into a project, under `upstream/<name>/` in its checkout. Code
+ * does the clone (a read, so it needs no approval); agents then reach the files like any other
+ * file in the checkout, and the pinned commit is recorded in the project config.
+ */
+export const UpstreamSpec = z.object({
+  repo: z.string().min(3).describe("owner/name on GitHub (private works through the gh login), or a git URL."),
+  name: z.string().regex(/^[a-z0-9][a-z0-9-]*$/).optional().describe("Directory name under upstream/. Default: the repository name in kebab-case."),
+  ref: z.string().optional().describe("Branch or tag to check out. Default: the repository's default branch."),
+  why: z.string().optional().describe("One line for the record: what the project needs it for."),
+});
+export type UpstreamSpec = z.infer<typeof UpstreamSpec>;
 
 /**
  * A new project (stream of work) proposed by an agent allowed to create them. Code does the
@@ -39,6 +53,7 @@ export const ProjectSpec = z.object({
   push: z.boolean().optional().describe("Open pull requests for green work. Default: the parent's setting for branch streams, true when there is a GitHub remote otherwise."),
   setup: z.string().optional().describe("Command run once per fresh worktree, e.g. 'bun install'."),
   link: z.array(z.string()).optional().describe("Entries of the main checkout to symlink into worktrees, e.g. node_modules."),
+  upstreams: z.array(UpstreamSpec).optional().describe("Repositories to fetch read-only into the new stream's checkout under upstream/<name>/ (a template to scaffold from, a reference to read). Fetched at once; the kickoff can rely on them."),
   kickoff: z.string().optional().describe("A first goal for the architect in the new stream, queued once the stream is set up. Omit to leave the stream idle."),
   make_current: z.boolean().optional().describe("Make it the current project. Only when the human asked to switch to it."),
 });
@@ -104,6 +119,7 @@ export const AgentResult = z.object({
   findings: z.array(Finding).default([]),
   subtasks: z.array(Subtask).default([]),
   projects: z.array(ProjectSpec).optional().describe("Only for agents that may create projects: new streams to create."),
+  upstreams: z.array(UpstreamSpec).optional().describe("Only for agents that may create projects: repositories to fetch read-only into THIS project's checkout under upstream/<name>/, so the agents working here can read them."),
   agent_proposals: z.array(AgentProposal).optional().describe("Only for delegating agents: agents that do not exist yet but would make currently impossible work possible. A human creates them; never name them in subtasks."),
   confirmation: ConfirmationRequest.optional().describe("Only for agents that require confirmation: the exact steps you want run, for the human to approve. Use with status attention."),
 });

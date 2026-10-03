@@ -28,13 +28,23 @@ export interface ShellGroup {
   tools: string[];
 }
 
-const GIT_READ = ["diff", "log", "show", "status", "blame", "ls-files", "rev-parse", "describe", "shortlog", "merge-base", "merge-tree", "cat-file", "name-rev"];
+/** `chmod +x` (or 755) on one relative path: the only mode change an agent may make. Anything else chmod is denied below. */
+const CHMOD_X = /^chmod\s+(\+x|u\+x|a\+x|ug\+x|755)\s+(?![/~])(?!\.\.(\/|$))(?!\S*\/\.\.(\/|$))\S+\s*$/;
+/** A script shipped inside an agent's own package, run by a shell-runtime agent: `bun "$AGENTPIPE_AGENT_DIR/import.ts"`. */
+const AGENT_SCRIPT = /^bun\s+"?\$AGENTPIPE_AGENT_DIR\/[\w./-]+"?(\s|$)/;
+
+const GIT_READ = ["diff", "log", "show", "status", "blame", "ls-files", "ls-tree", "rev-parse", "rev-list", "describe", "shortlog", "merge-base", "merge-tree", "cat-file", "name-rev"];
+/**
+ * `git -C DIR` for a directory inside the checkout (relative, no `..`, not `~` or absolute): how an
+ * agent reads the history of an upstream repository fetched under `upstream/<name>/`.
+ */
+const GIT_C_INSIDE = "-C\\s+(?![/~])(?!\\.\\.(/|\\s|$))(?!\\S*/\\.\\.(/|$))\\S+\\s+";
 
 export const SHELL_GROUPS: Record<string, ShellGroup> = {
   "git-read": {
-    description: "inspect history and diffs; never changes the tree or refs",
-    allow: [new RegExp(`^git\\s+(${GIT_READ.join("|")})(\\s|$)`), /^git\s+branch(\s+(--list|-a|-r|--show-current|--contains\s+\S+|--merged|--no-merged))*\s*$/, /^git\s+remote(\s+-v)?\s*$/, /^git\s+fetch(\s+\S+)*\s*$/, /^git\s+worktree\s+list\s*$/],
-    tools: [...GIT_READ.map((v) => `Bash(git ${v} *)`), ...GIT_READ.map((v) => `Bash(git ${v})`), "Bash(git branch *)", "Bash(git branch)", "Bash(git remote *)", "Bash(git fetch *)", "Bash(git worktree list)"],
+    description: "inspect history and diffs (also of upstream copies under upstream/); never changes the tree or refs",
+    allow: [new RegExp(`^git\\s+(${GIT_C_INSIDE})?(${GIT_READ.join("|")})(\\s|$)`), new RegExp(`^git\\s+(${GIT_C_INSIDE})?branch(\\s+(--list|-a|-r|--show-current|--contains\\s+\\S+|--merged|--no-merged))*\\s*$`), new RegExp(`^git\\s+(${GIT_C_INSIDE})?remote(\\s+-v)?\\s*$`), /^git\s+fetch(\s+\S+)*\s*$/, /^git\s+worktree\s+list\s*$/],
+    tools: [...GIT_READ.map((v) => `Bash(git ${v} *)`), ...GIT_READ.map((v) => `Bash(git ${v})`), "Bash(git -C *)", "Bash(git branch *)", "Bash(git branch)", "Bash(git remote *)", "Bash(git fetch *)", "Bash(git worktree list)"],
   },
   "gh-read": {
     description: "read pull requests, issues and workflow runs",
@@ -47,9 +57,9 @@ export const SHELL_GROUPS: Record<string, ShellGroup> = {
     tools: ["Bash(gh pr comment *)", "Bash(gh issue comment *)"],
   },
   checks: {
-    description: "run the project's lint and unit tests",
-    allow: [/^bun\s+run\s+(lint|test|test:unit|check|typecheck)(\s|$)/, /^bunx\s+vitest(\s|$)/, /^bun\s+test(\s|$)/, /^npm\s+(run\s+)?(lint|test|test:unit|check)(\s|$)/, /^npx\s+vitest(\s|$)/, /^bunx\s+(eslint|tsc|svelte-check|prettier\s+--check)(\s|$)/],
-    tools: ["Bash(bun run lint*)", "Bash(bun run test*)", "Bash(bun run check*)", "Bash(bun run typecheck*)", "Bash(bunx vitest *)", "Bash(bun test *)", "Bash(npm run lint*)", "Bash(npm run test*)", "Bash(npm test*)", "Bash(npx vitest *)", "Bash(bunx eslint *)", "Bash(bunx tsc *)", "Bash(bunx svelte-check *)", "Bash(bunx prettier --check *)"],
+    description: "run the project's lint and unit tests; mark a file in the checkout executable",
+    allow: [/^bun\s+run\s+(lint|test|test:unit|check|typecheck)(\s|$)/, /^bunx\s+vitest(\s|$)/, /^bun\s+test(\s|$)/, /^npm\s+(run\s+)?(lint|test|test:unit|check)(\s|$)/, /^npx\s+vitest(\s|$)/, /^bunx\s+(eslint|tsc|svelte-check|prettier\s+--check)(\s|$)/, CHMOD_X],
+    tools: ["Bash(bun run lint*)", "Bash(bun run test*)", "Bash(bun run check*)", "Bash(bun run typecheck*)", "Bash(bunx vitest *)", "Bash(bun test *)", "Bash(npm run lint*)", "Bash(npm run test*)", "Bash(npm test*)", "Bash(npx vitest *)", "Bash(bunx eslint *)", "Bash(bunx tsc *)", "Bash(bunx svelte-check *)", "Bash(bunx prettier --check *)", "Bash(chmod +x *)", "Bash(chmod 755 *)"],
   },
   "package-read": {
     description: "inspect dependencies and tool versions",
@@ -67,10 +77,12 @@ export const SHELL_GROUPS: Record<string, ShellGroup> = {
       /^node\s+(--version|-e\s|[\w./-]+\.(js|mjs|cjs))(\s|$)/,
       /^agentpipe-e2e(\s|$)/,
       /^podman\s+(ps|images|version|info)(\s|$)/,
+      AGENT_SCRIPT,
     ],
     tools: ["Bash(ls *)", "Bash(cat *)", "Bash(head *)", "Bash(tail *)", "Bash(wc *)", "Bash(find *)", "Bash(rg *)", "Bash(grep *)", "Bash(du *)", "Bash(df *)", "Bash(file *)", "Bash(stat *)", "Bash(tree *)", "Bash(jq *)", "Bash(bun *)", "Bash(bunx *)", "Bash(npm *)", "Bash(npx *)", "Bash(node *)", "Bash(agentpipe-e2e *)", "Bash(agentpipe-e2e)", "Bash(podman ps*)", "Bash(podman images*)", "Bash(podman version)"],
   },
 };
+
 
 /** Segments that are pure filters and may follow a pipe regardless of group. */
 const FILTERS = /^(head|tail|grep|rg|sort|uniq|wc|cut|tr|jq|sed\s+-n|awk|column|less|cat|xargs\s+-0\s+echo|tee\s+\/dev\/null)(\s|$)/;
@@ -80,13 +92,16 @@ export const DENY: [RegExp, string][] = [
   [/\bsudo\b|\bdoas\b|\bsu\s/, "privilege escalation"],
   [/\brm\s+(-[a-zA-Z]*r|--recursive)/, "recursive delete"],
   [/\brm\s+.*(\/|~|\$HOME|\.\.)/, "delete outside the working set"],
-  [/\bgit\s+(push|reset|clean|rebase|merge|commit|cherry-pick|revert|stash|checkout|switch|restore|filter-branch|update-ref|reflog\s+expire|gc|prune|remote\s+(add|remove|set-url)|config|worktree\s+(add|remove|prune)|branch\s+(-[dDmM]|--delete|--move))\b/, "git command that changes the tree, refs or remotes (the worker owns those)"],
+  // `git -C DIR verb` is the same verb: the directory flag must not hide a write.
+  [/\bgit\s+(-C\s+\S+\s+)?(push|reset|clean|rebase|merge|commit|cherry-pick|revert|stash|checkout|switch|restore|filter-branch|update-ref|reflog\s+expire|gc|prune|remote\s+(add|remove|set-url)|config|worktree\s+(add|remove|prune)|branch\s+(-[dDmM]|--delete|--move))\b/, "git command that changes the tree, refs or remotes (the worker owns those)"],
   [/\bgh\s+(pr\s+(merge|close|edit|ready|review|reopen|create|checkout)|issue\s+(close|edit|delete|reopen|create|transfer)|repo\s+(delete|edit|create|fork|clone|sync)|release|secret|variable|auth\s+(login|logout|refresh|token|setup-git)|api\b|workflow\s+(run|enable|disable)|run\s+(cancel|rerun|delete))/, "gh command that changes state or exposes credentials"],
   [/\b(curl|wget|fetch)\b.*\|\s*(ba|z|da)?sh\b/, "piping a download into a shell"],
   [/\b(curl|wget)\b/, "network access from an agent shell"],
   [/\b(nc|ncat|netcat|telnet|ssh|scp|rsync|sftp|ftp)\b/, "network or remote shell tool"],
-  [/\b(chmod|chown|chgrp|mkfs|mount|umount|dd|fdisk|parted|shutdown|reboot|systemctl|journalctl|kill|pkill|killall|crontab|nohup|setsid)\b/, "system administration command"],
-  [/\b(eval|exec|source|\.\s+\/|bash\s+-c|sh\s+-c|zsh\s+-c|xargs\s+(?!-0\s+echo))\b/, "indirect execution"],
+  [/\b(chown|chgrp|mkfs|mount|umount|dd|fdisk|parted|shutdown|reboot|systemctl|journalctl|kill|pkill|killall|crontab|nohup|setsid)\b/, "system administration command"],
+  [/\bchmod\b(?!\s+(\+x|u\+x|a\+x|ug\+x|755)\s+(?![/~])(?!\.\.(\/|$))(?!\S*\/\.\.(\/|$))\S+\s*($|[;&|)]))/, "chmod other than +x on one file inside the checkout"],
+  // Command words only: `find -exec` and a file called exec.ts are not indirect execution.
+  [/(^|[\s;&|(])(eval|exec|source)(\s|$)|(^|[\s;&|(])\.\s+\/|\b(bash|sh|zsh)\s+-c\b|(^|[\s;&|(])xargs\s+(?!-0\s+echo)/, "indirect execution"],
   [/\$\(|`|<\(|>\(/, "command substitution"],
   [/(^|[^2&])>(?!\s*(\/dev\/null|&2|&1))/, "writing to a file via redirection (use the Edit tool)"],
   [/\b(printenv|env)\s*$|\$\{?[A-Z_]*(TOKEN|SECRET|KEY|PASSWORD)[A-Z_]*\}?/, "reading credentials from the environment"],
@@ -103,7 +118,7 @@ export const DENY: [RegExp, string][] = [
  */
 export const APPROVED_DENY: [RegExp, string][] = DENY.filter(([, why]) => !why.startsWith("git command") && !why.startsWith("gh command") && !why.startsWith("writing to a file") && why !== "indirect execution").concat([
   // As in DENY, except `source` counts only as a command, so `gh repo create --source .` passes.
-  [/\b(eval|exec|bash\s+-c|sh\s+-c|zsh\s+-c|xargs\s+(?!-0\s+echo))\b|(^|[;&|]\s*)source\s|(^|\s)\.\s+\//, "indirect execution"],
+  [/(^|[\s;&|(])(eval|exec)(\s|$)|\b(bash|sh|zsh)\s+-c\b|(^|[\s;&|(])xargs\s+(?!-0\s+echo)|(^|[;&|]\s*)source\s|(^|\s)\.\s+\//, "indirect execution"],
 ]);
 
 /** Whether an approved-by-a-human command may run at all. Only the hard deny list applies; no allow list. */

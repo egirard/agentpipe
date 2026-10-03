@@ -110,3 +110,31 @@ describe("queuePrReview", () => {
     expect(store.children(gateTask.id)).toEqual([]);
   });
 });
+
+describe("createSubtasks across projects", () => {
+  test("a subtask naming another registered project lands there; unknown or archived projects are skipped", async () => {
+    const { createSubtasks } = await import("./worker.ts");
+    const { loadRegistry } = await import("./registry.ts");
+    mkdirSync(path.join(root, "other"));
+    const g = loadGlobalConfig();
+    g.projects.other = { path: path.join(root, "other"), base: "main", push: false };
+    g.projects.gone = { path: path.join(root, "gone"), base: "main", push: false, status: "archived" };
+    saveGlobalConfig(g);
+    const parent = store.add({ project: "demo", agent: "architect", title: "Create a stream", description: "x" });
+    const created = createSubtasks(store, loadGlobalConfig(), parent, [
+      { title: "Here", description: "in demo", agent: "coder", acceptance: ["a"] },
+      { title: "There", description: "in other", agent: "coder", acceptance: ["a"], project: "other", after: [0] },
+      { title: "Nowhere", description: "x", agent: "coder", acceptance: ["a"], project: "nope" },
+      { title: "Archived", description: "x", agent: "coder", acceptance: ["a"], project: "gone" },
+      { title: "No such agent", description: "x", agent: "unicorn", acceptance: ["a"], project: "other" },
+    ], loadRegistry(g.projects.demo));
+    expect(created.map((t) => [t.project, t.title])).toEqual([["demo", "Here"], ["other", "There"]]);
+    expect(created[1].depends_on).toEqual([created[0].id]);
+    expect(created[1].parent_id).toBe(parent.id);
+    expect(store.children(parent.id).length).toBe(2);
+    const warnings = store.events(parent.id).filter((e) => e.kind === "warning").map((e) => e.message);
+    expect(warnings.some((w) => w.includes('"nope"') && w.includes("not registered"))).toBe(true);
+    expect(warnings.some((w) => w.includes('"gone"') && w.includes("archived"))).toBe(true);
+    expect(warnings.some((w) => w.includes('"unicorn"') && w.includes("(in other)"))).toBe(true);
+  });
+});

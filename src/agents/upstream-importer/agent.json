@@ -1,0 +1,12 @@
+{
+  "name": "upstream-importer",
+  "description": "Copies files from an upstream repository fetched under upstream/<name>/ into the project: a chosen set of paths, with optional renames and literal substitutions, modes preserved, binaries byte for byte. Code does the copying from a JSON spec in the task; no model is involved. The worker then runs the checks, commits and opens the pull request.",
+  "runtime": "shell",
+  "when_to_use": "Bootstrapping a project from a template repository, vendoring documents or assets from a reference, or pulling a directory tree in from another repository that is registered as an upstream of this project (agentpipe projects upstream add). Not for files that must be written or adapted by hand: import them, then give docs-writer or coder a follow-up task on the imported copies. Not for fetching: the upstream must already be listed in the project.",
+  "inputs": "A fenced ```json block holding the spec: {\"upstream\": \"<name under upstream/>\", \"include\": [globs relative to the upstream root], \"exclude\": [globs], \"rename\": {\"src/prefix/\": \"dest/prefix/\"}, \"substitute\": {\"{{GAME}}\": \"Source of the Nile\"}, \"verbatim\": [globs copied without substitution], \"executable\": [globs made mode 755], \"overwrite\": false}. Only upstream and include are required. Say in prose what the import is for and which files other tasks will adapt afterwards.",
+  "outputs": "A branch with the imported files committed (one commit, message naming the upstream repository and commit), a pull request when the project pushes, and a report listing every file copied (with the substitutions applied), skipped or excluded, plus the upstream commit for provenance.",
+  "command": "bun \"$AGENTPIPE_AGENT_DIR/import.ts\"",
+  "commits": true,
+  "timeout_sec": 900,
+  "tags": ["upstream", "scaffold", "import"]
+}

@@ -75,6 +75,7 @@ agentpipe list                               # open tasks (--all for everything,
 agentpipe show 42                            # record, summary, replies, children, event log
 agentpipe reply 42 "Blue, like the other primary buttons"   # answer a task that asked something; it continues with your answer
 agentpipe retry 42 | cancel 42 --reason "needs a DB we do not have" | prio 42 10
+agentpipe edit 42 --description "read upstream/tt instead of cloning"   # fix what a task asks for (also on the page)
 agentpipe approve 42 | reject 42 --reason "not yet"   # decide what a github or agent-creator task proposed
 agentpipe digest                             # the architect's latest write-up
 agentpipe upgrade [--check]                  # on the box: pull the deployed checkout, bun install, restart the units
@@ -93,6 +94,9 @@ run directory with full logs. Three ways out:
   had already handed the parent to you, the parent goes back to `waiting` so the tree converges
   through the architect again once the child finishes.
 - `agentpipe retry ID` to run it again unchanged (a flaky test, a fixed environment).
+- `agentpipe edit ID` (or the "edit task" form on the page) when the description, acceptance
+  criteria, agent or priority are wrong: a kickoff written before the roster changed, a task that
+  names a refused command. The change is recorded as an event; reply or retry to requeue it.
 - `agentpipe cancel ID [--reason "..."]` when it proved impossible or moot. `cancelled` leaves
   "needs you", does not count against the agent's track record, and stays in the history with
   the reason. Agents can reach it too: an agent that finds its task impossible as specified
@@ -153,6 +157,11 @@ agentpipe projects create legacy --goal "..." --path ~/src/legacy        # an ex
 agentpipe projects pause|resume|archive NAME # paused/archived streams run nothing; their tasks wait
 agentpipe projects approve NAME              # run the GitHub steps an architect-made stream waits on
 agentpipe projects finish lighting           # open the PR merging the stream branch into its parent
+
+# other repositories a stream works from: fetched read-only INTO the checkout, under upstream/<name>/
+agentpipe projects upstream add egirard/TabletopTemplate --project nile1978     # -> ~/src/Nile1978/upstream/tabletop-template
+agentpipe projects upstream list | update tabletop-template | remove tabletop-template
+agentpipe projects budget nile1978 --daily-usd 15   # this stream's own daily Claude cap
 ```
 
 What the architect may do when it creates a stream: clone a repository, `git init` a new one,
@@ -165,6 +174,20 @@ it. Creating a stream yourself with `projects create` runs those steps at once.
 In a **branch stream** (`--branch-of`), tasks start from the stream branch and their pull
 requests target it; the stream shares its parent's checkout, setup and `agentpipe.json`. When
 it is done, `projects finish` opens the one PR into the parent's base, which you merge.
+
+**Upstream repositories.** A stream often works from another repository: a template to scaffold
+from, a rules reference, a specification. `agentpipe projects upstream add owner/repo` (or an
+`upstreams` list when the architect creates the stream, or `upstreams` in an architect's
+result for its own project) clones it read-only into `<checkout>/upstream/<name>/`, excluded
+from git through `.git/info/exclude` and symlinked into every worktree like `node_modules`.
+Because it is inside the checkout, every agent reads it with its ordinary tools (`Read`, `ls`,
+`cat`, `find`, `git -C upstream/<name> log`), and Claude agents read PDFs and images there
+too. The commit it was fetched at is recorded in the project config and printed in every prompt,
+so provenance is pinned without anyone re-deriving it. Fetching is a read: no approval round.
+Copying files from an upstream into the project is the **upstream-importer** agent: a task with a
+JSON spec (include and exclude globs, renames, literal substitutions, files to keep verbatim,
+files to make executable); code copies, the worker commits and opens the PR, and docs-writer or
+coder adapt the copies afterwards.
 
 Inside a registered checkout, commands pick that checkout's project (the current one if several
 streams share it, else the one whose branch is checked out). `--project NAME` or
@@ -185,7 +208,9 @@ no-go areas, how to run things).
 {
   "projects": {
     "ashardalon": { "path": "/home/girard/src/Ashardalon", "base": "main", "push": true, "goal": "The board game in the browser" },
-    "lighting": { "path": "/home/girard/src/Ashardalon", "base": "lighting", "push": true, "parent": "ashardalon", "goal": "Rework dungeon lighting", "status": "paused" }
+    "lighting": { "path": "/home/girard/src/Ashardalon", "base": "lighting", "push": true, "parent": "ashardalon", "goal": "Rework dungeon lighting", "status": "paused" },
+    "nile1978": { "path": "/home/girard/src/Nile1978", "base": "main", "push": true, "goal": "...", "dailyUsd": 15,
+                  "upstreams": { "tabletop-template": { "repo": "egirard/TabletopTemplate", "sha": "eccb7f2a…", "fetched": "2026-10-03T…" } } }
   },
   "defaultProject": "ashardalon",
   "worker": { "pollSec": 30, "pauseSec": 300, "maxAttempts": 3, "lanes": { "gpu": 1, "cloud": 1 } },
@@ -197,7 +222,9 @@ no-go areas, how to run things).
 ```
 
 Budgets are Claude spend as Claude Code reports it: per task (the task ends in attention when it
-runs out) and per UTC day (cloud tasks wait for tomorrow; local ones keep going). `agentpipe spend`
+runs out) and per UTC day (cloud tasks wait for tomorrow; local ones keep going). A project's own
+`dailyUsd` (`agentpipe projects budget NAME --daily-usd N`) stops that stream's cloud tasks
+when it alone has spent that much, so one stream's self-improvement cannot starve another. `agentpipe spend`
 breaks it down. Notifications go to a webhook (Discord, Slack, ntfy and the like accept the body
 as sent) and/or a command, for tasks needing you, the architect's digest, budget events and
 agents whose recent runs mostly needed intervention. Interrupted tasks are requeued on restart,
@@ -210,8 +237,10 @@ Agents never get a raw shell. A manifest names capability groups (`git-read`, `g
 permissions and into a hook that checks every command before it runs, with a deny list that
 nothing overrides (no git writes, no `gh` state changes, no network tools, no leaving the
 checkout, no credentials). Only `shell-runner` holds the broad `ops` group; other agents delegate
-commands to it. `agentpipe shell-check --groups git-read --command "git log -3"` shows what the
-policy would say.
+commands to it. Read-only git also works on upstream copies (`git -C upstream/<name> log`), and
+`chmod +x` on one file in the checkout is allowed to agents that commit; models cannot set modes
+otherwise, so a plan step marks scripts and hooks `executable` and the pipeline sets 755.
+`agentpipe shell-check --groups git-read --command "git log -3"` shows what the policy would say.
 
 ## The status page
 
@@ -228,6 +257,7 @@ policy would say.
 | `POST /api/tasks` | `{description, project?, agent?, title?, priority?, acceptance?}`: queue a task |
 | `POST /api/task/ID/reply` | `{text, requeue?}`: answer the agent; requeues a stopped task |
 | `POST /api/task/ID/retry`, `POST /api/task/ID/cancel` | `{}` / `{reason?}` |
+| `POST /api/task/ID/edit` | `{title?, description?, acceptance?, agent?, priority?, files?}`: change what a task asks for (not while running); the "edit task" form on the page |
 | `POST /api/task/ID/approve`, `POST /api/task/ID/reject` | decide a confirmation request; approve runs its steps while the page polls the task |
 | `POST /api/proposal/ID/dismiss` | drop a suggested agent |
 | `POST /api/upgrade` | `{force?}`: pull, install, and schedule a restart of the worker and web units |
@@ -321,8 +351,9 @@ result and the changed files before anything is committed or pushed.
 Built-ins: `architect` (also creates streams), `project-setup` (writes a new stream's `agentpipe.json` and `AGENTPIPE.md`), `coder`, `unit-tester`, `code-reviewer`, `local-reviewer` (Ollama, no
 cloud), `a11y-reviewer`, `ux-reviewer`, `docs-writer`, `graphics-designer` (SVG/CSS only),
 `project-manager`, `gitbot` (reports and comments, never merges), `shell-runner` (the only agent
-with a broad, vetted shell), `e2e-runner` (shell). The status page lists them all with their
-metadata, shell groups and track record.
+with a broad, vetted shell), `e2e-runner` (shell), `upstream-importer` (shell, commits: copies
+files from an upstream repository into the project from a JSON spec, no model). The status page
+lists them all with their metadata, shell groups and track record.
 
 The full design and authoring guide, with the result contract, runtime behaviour, verification,
 delegation rules, testing and a worked example, is in [docs/AGENTS.md](docs/AGENTS.md).
@@ -382,6 +413,11 @@ Other commands:
 
 ## When a step fails
 
+The local model's answer is checked before it touches the tree: a file that comes back as a
+fragment (under 40% of what it was) or JSON that does not parse is refused with the reason, so a
+truncated rewrite is never committed. The local reviewer may send a step back once; after that,
+green lint and tests win and the final cloud review sees the disputed diff.
+
 Every attempt is recorded: which files the coder wrote, its explanation, the exact lint/test output
 (clipped in prompts, complete on disk under `.agentpipe/runs/<stamp>/checks/`), the local reviewer's
 verdict, and what the cloud fixer did. When a step is exhausted, the working tree is reverted to the
@@ -428,6 +464,7 @@ every invocation with its turn count and the cost Claude Code reports.
 | `limits.replans` | How many times the architect may revise the plan after a failed step. |
 | `push` | Push green runs and open a PR (`--push`). |
 | `limits.coderContextChars` | How much source the coder sees per step. |
+| `limits.coderMaxFileChars` | A writable file larger than this (default 20,000) skips the local coder, which must return whole files, and goes straight to the cloud fixer. |
 | `commands.*` | Lint, unit, e2e commands. `unit` receives file paths after `--` for targeted runs. |
 
 ## e2e on NixOS

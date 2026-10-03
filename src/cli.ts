@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { addTask, approveTask, cancelTask, rejectTask, replyToTask, retryTask, viewProposal } from "./actions.ts";
+import { addTask, approveTask, cancelTask, editTask, rejectTask, replyToTask, retryTask, viewProposal } from "./actions.ts";
 import { architectReview, latestDigest } from "./architect.ts";
 import { claudeReachable } from "./claude.ts";
 import { loadConfig, loadEnvFile, type Config } from "./config.ts";
@@ -15,6 +15,7 @@ import { loadRegistry, requireAgent, scaffoldAgent, Runtime } from "./registry.t
 import { hasGitIdentity, repoStack } from "./repo.ts";
 import { shellCheckMain } from "./shell-policy.ts";
 import { Store, type TaskStatus } from "./store.ts";
+import { addUpstream, listUpstreams, removeUpstream, updateUpstream } from "./upstreams.ts";
 import { sh } from "./util.ts";
 import { checkForUpdate, runUpgrade } from "./upgrade.ts";
 import { runWeb } from "./web.ts";
@@ -33,6 +34,7 @@ Queue (the normal way to hand work to the system):
   agentpipe show ID                           # full record, events, replies, children
   agentpipe reply ID "answer" [--no-requeue]  # answer a task that stopped (attention/failed/cancelled); it is requeued and the agent continues with your reply
   agentpipe retry ID | cancel ID [--reason "why"] | prio ID N   # cancelled = impossible or moot; leaves "needs you", stays in history
+  agentpipe edit ID [--title T] [--description TEXT | --desc-file F] [--accept "a;b"] [--agent NAME] [--priority N] [--files a,b]   # change what a task asks for (not while running)
   agentpipe approve ID | reject ID [--reason "why"]   # decide a confirmation request (github, agent-creator): approve runs the listed steps as you
   agentpipe worker [--once] [--project P]     # drain the queue (normally a systemd user service)
   agentpipe architect review [--project P] [--dry-run]   # the architect's wake-up (normally a systemd timer)
@@ -58,6 +60,9 @@ another project. One queue and worker serve them all; the current project's task
   agentpipe projects add NAME PATH [--base main] [--push] [--default] [--goal "..."] [--link node_modules,.svelte-kit] [--setup "bun install"] [--agents-dir DIR]
   agentpipe projects pause|resume|archive NAME    # paused and archived projects run nothing
   agentpipe projects approve NAME             # run the GitHub steps an architect-created project is waiting on
+  agentpipe projects upstream add owner/repo|URL [--name N] [--ref BRANCH] [--project P]   # fetch another repository read-only into <checkout>/upstream/N
+  agentpipe projects upstream list|update N [--ref B]|remove N [--project P]
+  agentpipe projects budget NAME --daily-usd N   # this project's own daily Claude cap (0 = only the global cap)
   agentpipe projects finish NAME              # branch stream: open the PR merging it into its parent
   agentpipe projects remove NAME
   agentpipe spend [--days 7]                  # Claude spend by day, agent and project
@@ -78,7 +83,7 @@ Files: ~/.config/agentpipe/agentpipe.json (projects), ~/.config/agentpipe/env (C
 function parseArgs(argv: string[]) {
   const flags: Record<string, string | boolean> = {};
   const positional: string[] = [];
-  const valued = new Set(["repo", "project", "agent", "priority", "after", "files", "branch", "file", "status", "base", "runtime", "title", "port", "tls-port", "host", "webui", "dir", "accept", "link", "setup", "agents-dir", "days", "goal", "path", "clone", "github", "branch-of", "kickoff", "reason", "from"]);
+  const valued = new Set(["repo", "project", "agent", "priority", "after", "files", "branch", "file", "status", "base", "runtime", "title", "port", "tls-port", "host", "webui", "dir", "accept", "link", "setup", "agents-dir", "days", "goal", "path", "clone", "github", "branch-of", "kickoff", "reason", "from", "description", "desc-file", "name", "ref", "daily-usd"]);
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a.startsWith("--")) {
@@ -392,6 +397,28 @@ async function main() {
       if (r.requeued && !existsSync(lock)) console.log("note: no worker is running. Start it: systemctl --user start agentpipe-worker   (or: agentpipe worker)");
       break;
     }
+    case "edit": {
+      const id = Number(positional.shift());
+      if (!Number.isInteger(id)) throw new Error('usage: agentpipe edit ID [--title T] [--description TEXT | --desc-file F] [--accept "a;b"] [--agent NAME] [--priority N] [--files a,b]');
+      const store = new Store();
+      const before = store.get(id);
+      if (!before) throw new Error(`no task #${id}`);
+      let description = str(flags.description) ?? (positional.length ? positional.join(" ") : undefined);
+      if (flags["desc-file"]) description = readFileSync(str(flags["desc-file"])!, "utf8");
+      if (description === undefined && !flags.title && !flags.accept && !flags.agent && !flags.priority && !flags.files && !process.stdin.isTTY) description = (await Bun.stdin.text()).trim() || undefined;
+      const edits = store.events(id).filter((e) => e.kind === "edited").length;
+      editTask(store, loadGlobalConfig(), id, {
+        title: str(flags.title) ?? null,
+        description: description ?? null,
+        acceptance: str(flags.accept) !== undefined ? str(flags.accept)!.split(/\s*;\s*/) : null,
+        agent: str(flags.agent) ?? null,
+        priority: flags.priority ? Number(flags.priority) : null,
+        files: str(flags.files) !== undefined ? str(flags.files)!.split(",") : null,
+      }, process.env.USER ?? "cli");
+      const after = store.events(id).filter((e) => e.kind === "edited");
+      console.log(after.length > edits ? `#${id} edited ${after[after.length - 1].message}` : `#${id} unchanged (nothing differed)`);
+      break;
+    }
     case "prio": {
       const store = new Store();
       const id = Number(positional[0]);
@@ -619,7 +646,37 @@ async function main() {
       } else if (sub === "approve") {
         const name = positional[0];
         if (!name) throw new Error("usage: agentpipe projects approve NAME");
-        for (const line of await approvePending(name)) console.log(line);
+        for (const line of await approvePending(name, new Store())) console.log(line);
+      } else if (sub === "upstream" || sub === "upstreams") {
+        const verb = positional.shift() ?? "list";
+        const { name: pname, project } = resolveProject(g, str(flags.project));
+        if (verb === "list") {
+          const rows = listUpstreams(project);
+          console.log(rows.length ? `${pname} (${project.path}/upstream/):\n${rows.map((r) => "  " + r).join("\n")}` : `${pname} has no upstream repositories (agentpipe projects upstream add owner/repo)`);
+        } else if (verb === "add") {
+          const repo = positional[0];
+          if (!repo) throw new Error("usage: agentpipe projects upstream add owner/repo|URL [--name N] [--ref BRANCH] [--project P]");
+          const r = await addUpstream(pname, { repo, name: str(flags.name), ref: str(flags.ref) });
+          console.log(`${pname}: ${r.note}\n  ${r.path}`);
+        } else if (verb === "update") {
+          const n = positional[0];
+          if (!n) throw new Error("usage: agentpipe projects upstream update NAME [--ref BRANCH] [--project P]");
+          console.log(`${pname}: ${(await updateUpstream(pname, n, str(flags.ref))).note}`);
+        } else if (verb === "remove") {
+          const n = positional[0];
+          if (!n) throw new Error("usage: agentpipe projects upstream remove NAME [--project P]");
+          console.log(removeUpstream(pname, n));
+        } else throw new Error("usage: agentpipe projects upstream [list|add REPO|update NAME|remove NAME]");
+      } else if (sub === "budget") {
+        const name = positional[0];
+        if (!name || !g.projects[name] || flags["daily-usd"] === undefined) throw new Error(`usage: agentpipe projects budget NAME --daily-usd N (known: ${Object.keys(g.projects).join(", ")})`);
+        const usd = Number(flags["daily-usd"]);
+        if (!Number.isFinite(usd) || usd < 0) throw new Error("--daily-usd must be a number of dollars (0 = only the global cap)");
+        updateGlobalConfig((c) => {
+          if (usd) c.projects[name].dailyUsd = usd;
+          else delete c.projects[name].dailyUsd;
+        });
+        console.log(`${name}: daily Claude cap ${usd ? "$" + usd : "none (global cap only)"}; spent today ${new Store().spendToday(name).toFixed(2)}`);
       } else if (sub === "finish") {
         const name = positional[0];
         if (!name) throw new Error("usage: agentpipe projects finish NAME");
@@ -631,7 +688,7 @@ async function main() {
         delete g.projects[name];
         if (g.defaultProject === name) g.defaultProject = Object.keys(g.projects)[0] ?? null;
         console.log(`removed ${name} from ${saveGlobalConfig(g)} (its tasks stay in the queue history)`);
-      } else throw new Error("usage: agentpipe projects [list|new|create|add|pause|resume|archive|approve|finish|remove] ...");
+      } else throw new Error("usage: agentpipe projects [list|new|create|add|pause|resume|archive|approve|upstream|budget|finish|remove] ...");
       break;
     }
 

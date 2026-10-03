@@ -113,3 +113,9 @@ let's introduce a new category of agents: RequiresConfirmation.  These agents ca
 agentpipe is not available in the project list; the text input fields lose their content and context at reload.
 
 `Outcome: web server now re-reads projects per request (it had a stale copy); page saves drafts and open rows to browser storage, restores them on reload, and reloads itself when the server commit changes. Verified in headless Chromium on mothership; deployed (f073c2d).`
+
+## 20. 2026-10-02
+
+The mothership experiment has proven that our agent system needs some work.  Please review the installation and evaluate what happened and what went wrong.  I think we need to revise some of the agents.  For example, we should have a "check out a git repository within this directory, flagged as untracked within this repository" so that we can properly integrate content from other repositories.  There are likely many other points of failure, so please evaluate.
+
+`Outcome: post-mortem of the Nile1978 run on mothership from the task DB, digests, run logs and code; root causes ranked (stripAnsi corrupting diffs, upstream cache outside the checkout, subtasks bound to the parent project, chmod/file-mode gap, 7B coder context limits); no code changed.`

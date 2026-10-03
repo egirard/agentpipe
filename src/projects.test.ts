@@ -217,3 +217,58 @@ describe("createProposedProjects (worker)", () => {
     store.close();
   });
 });
+
+describe("upstreams and stream closure", () => {
+  test("a new stream fetches its upstreams before anything runs, and approving its held steps closes the creating task", async () => {
+    saveGlobalConfig(loadGlobalConfig());
+    const template = path.join(root, "template");
+    await gitRepo(template);
+    const store = new Store();
+    const task = store.add({ project: "home", agent: "architect", title: "Create z", description: "Create z" });
+    store.setStatus(task.id, "running");
+    const r: AgentResult = { status: "done", summary: "Created the stream.", findings: [], subtasks: [] };
+    // "gh repo create" would fail here; a harmless pending command stands in for it.
+    const created = await createProposedProjects(store, task, [spec({ name: "z", kind: "new", path: path.join(root, "z"), upstreams: [{ repo: template, name: "tt", why: "the template" }], kickoff: "Scaffold z from upstream/tt" })], { result: r, verification: { ran: true, ok: true, problems: [] } });
+    expect(created).toBe(false);
+    const z = loadGlobalConfig().projects.z;
+    expect(z.upstreams?.tt.repo).toBe(template);
+    expect(z.upstreams?.tt.sha).toMatch(/^[0-9a-f]{40}$/);
+    expect(z.createdByTask).toBe(task.id);
+    expect(existsSync(path.join(root, "z", "upstream", "tt", "README.md"))).toBe(true);
+    expect(r.summary).toContain("fetched " + template);
+    expect(store.list({ project: "z" }).map((t) => t.agent)).toEqual(["project-setup", "architect"]);
+
+    // Simulate the held GitHub step and the creating task waiting in attention.
+    updateGlobalConfig((g) => void (g.projects.z.pending = [{ command: "true", cwd: path.join(root, "z"), why: "stand-in" }]));
+    store.setStatus(task.id, "attention");
+    expect(isRunnable(loadGlobalConfig().projects.z)).toBe(false);
+    const lines = await approvePending("z", store);
+    expect(lines.join("\n")).toContain("z approved");
+    expect(lines.join("\n")).toContain(`#${task.id}`);
+    expect(store.get(task.id)!.status).toBe("done");
+    expect(isRunnable(loadGlobalConfig().projects.z)).toBe(true);
+    store.close();
+  });
+
+  test("upstreams an agent requests for its own project are fetched; a bad one turns the task into attention", async () => {
+    const { fetchRequestedUpstreams } = await import("./worker.ts");
+    const dir = path.join(root, "home2");
+    await gitRepo(dir);
+    register("home2", dir);
+    const template = path.join(root, "template2");
+    await gitRepo(template);
+    const store = new Store();
+    const task = store.add({ project: "home2", agent: "architect", title: "Plan", description: "Plan" });
+    const ok: AgentResult = { status: "done", summary: "Need the template.", findings: [], subtasks: [] };
+    expect(await fetchRequestedUpstreams(store, task, [{ repo: template, name: "tt" }], { result: ok, verification: { ran: true, ok: true, problems: [] } })).toBe(true);
+    expect(ok.status).toBe("done");
+    expect(ok.summary).toContain("## Upstream repositories");
+    expect(loadGlobalConfig().projects.home2.upstreams?.tt.sha).toMatch(/^[0-9a-f]{40}$/);
+    expect(store.events(task.id).some((e) => e.kind === "upstream")).toBe(true);
+    const bad: AgentResult = { status: "done", summary: "Need another.", findings: [], subtasks: [] };
+    expect(await fetchRequestedUpstreams(store, task, [{ repo: path.join(root, "missing") }], { result: bad, verification: { ran: true, ok: true, problems: [] } })).toBe(false);
+    expect(bad.status).toBe("attention");
+    expect(bad.summary).toContain("NOT fetched");
+    store.close();
+  });
+});

@@ -28,6 +28,22 @@ export interface PendingStep {
   why: string;
 }
 
+/**
+ * A read-only copy of another repository, cloned into `<checkout>/upstream/<name>/`, excluded from
+ * git and symlinked into every worktree: templates to copy from, references to read, dependencies to
+ * pin. Agents read it with their ordinary tools because it is inside the checkout.
+ */
+export interface UpstreamConfig {
+  /** owner/name on GitHub, or any git URL or local path. */
+  repo: string;
+  /** Branch or tag checked out; empty = the default branch. */
+  ref?: string;
+  /** Commit the copy is at, recorded when it was fetched or updated. */
+  sha?: string;
+  /** ISO timestamp of the last fetch. */
+  fetched?: string;
+}
+
 export interface ProjectConfig {
   /** Absolute path of the main checkout. The worker never edits it; it makes worktrees next to it. */
   path: string;
@@ -53,6 +69,12 @@ export interface ProjectConfig {
   created?: string;
   /** Remote steps waiting for `agentpipe projects approve`; the project does not run until they are done. */
   pending?: PendingStep[];
+  /** Other repositories fetched read-only under <checkout>/upstream/<name>/ (see UpstreamConfig). */
+  upstreams?: Record<string, UpstreamConfig>;
+  /** Claude spend this project alone may cause per UTC day; its cloud tasks wait when reached. 0 or absent = only the global cap applies. */
+  dailyUsd?: number;
+  /** The task whose agent created this stream; it is closed when the held GitHub steps are approved. */
+  createdByTask?: number;
 }
 
 export interface GlobalConfig {
@@ -176,6 +198,9 @@ export function loadGlobalConfig(): GlobalConfig {
       ...(pr.parent ? { parent: pr.parent } : {}),
       ...(pr.created ? { created: pr.created } : {}),
       ...(pr.pending?.length ? { pending: pr.pending } : {}),
+      ...(pr.upstreams && Object.keys(pr.upstreams).length ? { upstreams: pr.upstreams } : {}),
+      ...(pr.dailyUsd ? { dailyUsd: pr.dailyUsd } : {}),
+      ...(pr.createdByTask ? { createdByTask: pr.createdByTask } : {}),
     };
   }
   if (!cfg.defaultProject && Object.keys(cfg.projects).length === 1) cfg.defaultProject = Object.keys(cfg.projects)[0];

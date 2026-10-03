@@ -102,3 +102,15 @@ describe("openPrGates", () => {
     expect(store.openPrGates("demo")[0].pr_gate!.pr_url).toBe("https://github.com/egirard/agentpipe/pull/42");
   });
 });
+
+describe("spendToday", () => {
+  test("totals per project and overall", () => {
+    const a = store.add({ project: "demo", agent: "coder", title: "a", description: "a" });
+    const b = store.add({ project: "other", agent: "coder", title: "b", description: "b" });
+    store.addUsage({ task_id: a.id, project: "demo", agent: "coder", label: "x", model: "m", cost_usd: 1.5, turns: 1, seconds: 1 });
+    store.addUsage({ task_id: b.id, project: "other", agent: "coder", label: "x", model: "m", cost_usd: 2, turns: 1, seconds: 1 });
+    expect(store.spendToday()).toBeCloseTo(3.5);
+    expect(store.spendToday("demo")).toBeCloseTo(1.5);
+    expect(store.spendToday("nothing")).toBe(0);
+  });
+});

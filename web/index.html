@@ -419,6 +419,12 @@ details summary { cursor: pointer; color: var(--text-2); }
       ${d.replies.length ? `<ul class="replies">${d.replies.map((r) => `<li><div class="who">${esc(r.author)} · ${esc(when(r.ts))}</div>${esc(r.text)}</li>`).join("")}</ul>` : ""}
       <form class="reply-form" data-id="${t.id}"><textarea name="text" placeholder="${stopped ? "Answer the agent or tell it what to do differently. The task is requeued and the agent sees your reply with its previous report." : "A note for the agent's next run (does not requeue)."}"></textarea>
         <div class="actions"><button class="primary" type="submit">${stopped ? "Reply and continue" : "Add note"}</button>${canRetry ? `<button type="button" data-action="retry" data-id="${t.id}">Retry as is</button>` : ""}${canCancel ? `<button type="button" class="danger" data-action="cancel" data-id="${t.id}">Cancel task</button>` : ""}<span class="note"></span></div></form>
+      ${t.status !== "running" ? `<details><summary>edit task</summary><form class="edit-form" data-id="${t.id}">
+        <label class="small">title<input name="title" value="${esc(t.title)}" style="width:100%"></label>
+        <label class="small">description<textarea name="description" style="min-height:160px">${esc(t.description)}</textarea></label>
+        <label class="small">acceptance criteria, one per line<textarea name="acceptance" style="min-height:48px">${esc(t.acceptance.join("\n"))}</textarea></label>
+        <label class="small">agent <input name="agent" value="${esc(t.agent)}" size="18"> priority <input name="priority" type="number" min="1" max="99" value="${t.priority}" style="width:5em"></label>
+        <div class="actions"><button class="primary" type="submit">Save changes</button><span class="note">${STOPPED.has(t.status) ? "Saved changes are what the agent sees when the task runs again (reply or retry to requeue it)." : "The agent sees the saved text when the task starts."}</span></div></form></details>` : ""}
       <details><summary>events (${d.events.length})</summary><pre>${d.events.map((e) => esc(e.ts.slice(0, 19) + " " + e.kind + ": " + e.message)).join("\n")}</pre></details></td>`;
   }
 
@@ -525,6 +531,20 @@ details summary { cursor: pointer; color: var(--text-2); }
   });
 
   document.addEventListener("submit", async (ev) => {
+    const edit = ev.target.closest("form.edit-form");
+    if (edit) {
+      ev.preventDefault();
+      const note = edit.querySelector(".note"), submit = edit.querySelector("button[type=submit]");
+      const f = (n) => edit.querySelector(`[name=${n}]`).value;
+      try {
+        submit.disabled = true;
+        const r = await api(`/api/task/${edit.dataset.id}/edit`, { title: f("title"), description: f("description"), acceptance: f("acceptance").split("\n"), agent: f("agent"), priority: f("priority") || null });
+        const tr = edit.closest("tr.detail");
+        if (tr) await refreshDetail(tr, r);
+        else setNote(note, r.note);
+      } catch (e) { setNote(note, String(e.message || e), true); submit.disabled = false; }
+      return;
+    }
     const form = ev.target.closest("form.reply-form");
     if (!form) return;
     ev.preventDefault();

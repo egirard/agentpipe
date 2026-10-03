@@ -123,7 +123,10 @@ Plan rules:
 - context_files: the minimum the coder must read (type definitions, one similar example). Keep total context small.
 - List e2e specs only where the step changes UI or flows that an existing spec covers.
 - Never plan screenshot baseline updates; flag them under risks instead.
-- Order steps so each one leaves the suite green.`;
+- Order steps so each one leaves the suite green.
+- Mark scripts and git hooks with "executable": true on the file entry; the pipeline sets the mode, nobody can chmod.
+- A file over about 20,000 characters cannot be rewritten by the local model and goes to the cloud fixer; prefer steps that extract a small helper first, and never ask for a whole-file rewrite of a large file.
+- The repository may hold read-only copies of other repositories under upstream/<name>/; read them for reference but never list them as writable or context files.`;
 
 export async function architectPlan(cfg: Config, task: string): Promise<Plan> {
   const overview = await repoOverview(cfg.repo);
@@ -220,18 +223,19 @@ export async function architectReplan(cfg: Config, f: FailureContext): Promise<R
   return Replan.parse(raw);
 }
 
-const FIXER_SYSTEM = `You are taking over a step that a weaker local model could not complete. Read what you need, edit files, and run lint and the step's unit tests until they pass. Keep changes minimal and in the repo's style. Do not run git commands, do not modify screenshot baselines, and do not touch files unrelated to the step. Finish with a short summary of what you changed and why.`;
+const FIXER_SYSTEM = `You are taking over a step that a weaker local model could not complete, or was not trusted with. Read what you need, edit files, and run lint and the step's unit tests until they pass. Keep changes minimal and in the repo's style. Do not run git commands, do not modify screenshot baselines, and do not touch files unrelated to the step. Files the step marks executable get their mode set by the pipeline after you finish; do not try to chmod. Finish with a short summary of what you changed and why.`;
 
-export async function cloudFix(cfg: Config, step: PlanStep, diffSoFar: string, failing: CheckResult[]): Promise<{ ok: boolean; summary: string; lastChecks: CheckResult[] }> {
+export async function cloudFix(cfg: Config, step: PlanStep, diffSoFar: string, failing: CheckResult[], note?: string): Promise<{ ok: boolean; summary: string; lastChecks: CheckResult[] }> {
   const unitCmd = step.unit_tests.length ? `${cfg.commands.unit} -- ${step.unit_tests.join(" ")}` : cfg.commands.unit;
   const prompt = [
     `# Step ${step.id}: ${step.title}`,
     step.description,
     "",
+    ...(note ? [`## Why this step comes to you`, note, ""] : []),
     "## Acceptance criteria",
     ...step.acceptance.map((a) => `- ${a}`),
     "",
-    `## Files the step was meant to touch\n${step.files.map((f) => `- ${f.path} (${f.action})`).join("\n")}`,
+    `## Files the step was meant to touch\n${step.files.map((f) => `- ${f.path} (${f.action}${f.executable ? ", executable" : ""})`).join("\n")}`,
     "",
     `## Commands to verify\n- lint: \`${cfg.commands.lint}\`\n- unit: \`${unitCmd}\``,
     "",

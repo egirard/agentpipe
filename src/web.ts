@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { addTask, approveTask, cancelTask, rejectTask, replyToTask, retryTask, viewProposal } from "./actions.ts";
+import { addTask, approveTask, cancelTask, editTask, rejectTask, replyToTask, retryTask, viewProposal } from "./actions.ts";
 import { latestDigest } from "./architect.ts";
 import { agentpipeRoot, currentProject, dataDir, loadGlobalConfig, projectStatus, type GlobalConfig } from "./global.ts";
 import { loadRegistry } from "./registry.ts";
@@ -433,7 +433,7 @@ export function createHandler(store: Store, gcfg: GlobalConfig, o: WebOpts, tls:
           log(`web: ${by} upgrade: ${r.lines.join(" | ")}`);
           return Response.json({ ok: r.ok, lines: r.lines, restarted: r.restarted }, { status: r.ok ? 200 : 409, headers });
         }
-        const tm = url.pathname.match(/^\/api\/task\/(\d+)\/(reply|retry|cancel|approve|reject)$/);
+        const tm = url.pathname.match(/^\/api\/task\/(\d+)\/(reply|retry|cancel|approve|reject|edit)$/);
         if (tm) {
           const id = Number(tm[1]);
           const b = await jsonBody(req);
@@ -454,6 +454,18 @@ export function createHandler(store: Store, gcfg: GlobalConfig, o: WebOpts, tls:
             const r = replyToTask(store, id, typeof b.text === "string" ? b.text : "", by, { requeue: b.requeue !== false });
             log(`web: ${by} replied to #${id}${r.requeued ? " (requeued)" : ""}`);
             return Response.json({ ok: true, task: taskRow(r.task), requeued: r.requeued, note: r.note, ...taskDetail(store, id) }, { headers });
+          }
+          if (tm[2] === "edit") {
+            const t = editTask(store, fresh, id, {
+              title: typeof b.title === "string" ? b.title : null,
+              description: typeof b.description === "string" ? b.description : null,
+              acceptance: Array.isArray(b.acceptance) ? b.acceptance.map(String) : typeof b.acceptance === "string" ? b.acceptance.split("\n") : null,
+              files: Array.isArray(b.files) ? b.files.map(String) : typeof b.files === "string" ? b.files.split(/[,\s]+/) : null,
+              agent: typeof b.agent === "string" ? b.agent : null,
+              priority: b.priority == null || b.priority === "" ? null : Number(b.priority),
+            }, by);
+            log(`web: ${by} edited #${id}`);
+            return Response.json({ ok: true, task: taskRow(t), note: `#${id} saved`, ...taskDetail(store, id) }, { headers });
           }
           if (tm[2] === "retry") {
             const t = retryTask(store, id, by);
