@@ -383,6 +383,17 @@ function finish(store: Store, gcfg: GlobalConfig, task: Task, outcome: RunOutcom
   const t = store.get(task.id)!;
   log(`worker: #${task.id} -> ${t.status}${t.pr_url ? ` (${t.pr_url})` : ""}${t.cost_usd ? ` $${t.cost_usd.toFixed(2)}` : ""}`);
 
+  // A pull request the task opened waits for a human: queue the task that shepherds it. A missing
+  // gate agent or an unreadable registry must never break the task that just finished.
+  if (outcome && t.pr_url) {
+    try {
+      const review = queuePrReview(store, gcfg, t, registry ?? loadRegistry(gcfg.projects[t.project]));
+      if (review) log(`worker: queued #${review.id} [${review.agent}] to shepherd ${t.pr_url}`);
+    } catch (e) {
+      log(`worker: could not queue a pull request review for #${t.id}: ${(e as Error).message}`);
+    }
+  }
+
   if (t.status === "attention" || t.status === "failed" || t.status === "cancelled") {
     const pending = t.confirmation?.status === "pending" ? t.confirmation.request : null;
     void notify(gcfg, {
@@ -445,4 +456,60 @@ export function createSubtasks(store: Store, gcfg: GlobalConfig, parent: Task, s
   }
   if (created.length) store.event(parent.id, "subtasks", created.map((t) => `#${t.id} [${t.agent}] ${t.title}`).join("; "));
   return created;
+}
+
+/**
+ * What the gate agent must do on each run. Copied onto every review task, so the task stands on
+ * its own for an agent that has no other context.
+ */
+const PR_REVIEW_PLAYBOOK =
+  "The human decides on the status page: Approve, Give feedback, or Deny. On your first run, read the pull request and present it: what it changes, whether its checks pass, anything risky, and the link. End with status attention, saying the human may approve, give feedback or deny. On a later run a reply will tell you the decision the human made or what changed on the pull request; act on it and do not ask again.";
+
+/** Acceptance criteria written onto every review task. */
+const PR_REVIEW_ACCEPTANCE = [
+  "The summary links the pull request and says what it changes and whether its checks pass",
+  "The task ends in attention asking the human to approve, give feedback or deny, unless a decision or new pull request activity is already in the replies",
+  "Nothing is merged, closed or commented on GitHub by this task",
+];
+
+/** The review task's description: the pull request, where it came from, and what to do with it. */
+function prReviewDescription(task: Task): string {
+  const lines = [
+    "A pull request this pipeline opened is waiting for the human.",
+    "",
+    `- Pull request: ${task.pr_url}`,
+    `- Branch: ${task.branch ?? "(unknown)"}${task.base_branch ? `, from ${task.base_branch}` : ""}`,
+    `- Opened by task #${task.id} [${task.agent}]: ${task.title}`,
+  ];
+  if (task.acceptance.length) lines.push("", `Acceptance criteria of #${task.id}:`, ...task.acceptance.map((a) => `- ${a}`));
+  lines.push("", PR_REVIEW_PLAYBOOK);
+  return lines.join("\n");
+}
+
+/**
+ * A pull request a task opened needs a human decision, so one review task per pull request is
+ * queued with a gate attached. Returns null, changing nothing, when the feature is off, the task
+ * opened no pull request, the task is itself a gate task, the gate agent is not registered, or a
+ * gate for the same pull request is already open.
+ */
+export function queuePrReview(store: Store, gcfg: GlobalConfig, task: Task, registry: Registry): Task | null {
+  if (!gcfg.prReview.enabled) return null;
+  if (!task.pr_url) return null;
+  if (task.agent === gcfg.prReview.agent) return null;
+  if (!registry.agents.has(gcfg.prReview.agent)) return null;
+  if (store.openPrGates(task.project).some((t) => t.pr_gate?.pr_url === task.pr_url)) return null;
+  const review = store.add({
+    project: task.project,
+    agent: gcfg.prReview.agent,
+    title: clip(`Review PR for #${task.id}: ${task.title}`, 200),
+    description: prReviewDescription(task),
+    acceptance: PR_REVIEW_ACCEPTANCE,
+    parent_id: task.id,
+    branch: task.branch,
+    priority: Math.max(1, task.priority - 10),
+    created_by: `worker#${task.id}`,
+  });
+  store.setPrGate(review.id, { pr_url: task.pr_url, source_task: task.id, decision: null, snapshot: null, checked_at: null, log: [] });
+  store.event(task.id, "pr-review", `queued #${review.id} to shepherd ${task.pr_url}`);
+  return store.get(review.id)!;
 }
