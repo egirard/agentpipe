@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
 import path from "node:path";
 import { dataDir } from "./global.ts";
+import type { PrGate } from "./pr.ts";
 import type { ConfirmationRequest } from "./result.ts";
 
 /**
@@ -73,6 +74,8 @@ export interface Task {
   worktree: string | null;
   /** Set when an agent with requires_confirmation asked for approval. */
   confirmation: Confirmation | null;
+  /** Set when this task gates a pull request: the URL, the human's decision, and the last state seen on GitHub. */
+  pr_gate: PrGate | null;
 }
 
 export interface NewTask {
@@ -225,6 +228,7 @@ const MIGRATIONS: [string, string][] = [
   ["lane", "TEXT"],
   ["worktree", "TEXT"],
   ["confirmation", "TEXT"],
+  ["pr_gate", "TEXT"],
 ];
 
 function now(): string {
@@ -255,7 +259,7 @@ export class Store {
 
   private row(r: any): Task | null {
     if (!r) return null;
-    return { ...r, depends_on: JSON.parse(r.depends_on || "[]"), files: JSON.parse(r.files || "[]"), acceptance: JSON.parse(r.acceptance || "[]"), cost_usd: r.cost_usd ?? 0, confirmation: r.confirmation ? JSON.parse(r.confirmation) : null } as Task;
+    return { ...r, depends_on: JSON.parse(r.depends_on || "[]"), files: JSON.parse(r.files || "[]"), acceptance: JSON.parse(r.acceptance || "[]"), cost_usd: r.cost_usd ?? 0, confirmation: r.confirmation ? JSON.parse(r.confirmation) : null, pr_gate: r.pr_gate ? JSON.parse(r.pr_gate) : null } as Task;
   }
 
   add(t: NewTask): Task {
@@ -333,13 +337,13 @@ export class Store {
     return OPEN_STATUSES.reduce((n, s) => n + c[s], 0);
   }
 
-  update(id: number, patch: Partial<Omit<Task, "id" | "depends_on" | "files" | "acceptance" | "confirmation">> & { depends_on?: number[]; files?: string[]; acceptance?: string[]; confirmation?: Confirmation | null }): Task {
+  update(id: number, patch: Partial<Omit<Task, "id" | "depends_on" | "files" | "acceptance" | "confirmation" | "pr_gate">> & { depends_on?: number[]; files?: string[]; acceptance?: string[]; confirmation?: Confirmation | null; pr_gate?: PrGate | null }): Task {
     const cols: string[] = [];
     const params: any[] = [];
     for (const [k, v] of Object.entries(patch)) {
       if (v === undefined) continue;
       cols.push(`${k} = ?`);
-      params.push(k === "depends_on" || k === "files" || k === "acceptance" ? JSON.stringify(v) : k === "confirmation" ? (v === null ? null : JSON.stringify(v)) : v);
+      params.push(k === "depends_on" || k === "files" || k === "acceptance" ? JSON.stringify(v) : k === "confirmation" || k === "pr_gate" ? (v === null ? null : JSON.stringify(v)) : v);
     }
     if (cols.length) this.db.query(`UPDATE tasks SET ${cols.join(", ")} WHERE id = ?`).run(...params, id);
     return this.get(id)!;
@@ -507,6 +511,27 @@ export class Store {
 
   setConfirmation(id: number, c: Confirmation | null): Task {
     return this.update(id, { confirmation: c });
+  }
+
+  /** Attach the pull request this task is gating, or clear it with null. */
+  setPrGate(id: number, gate: PrGate | null): Task {
+    return this.update(id, { pr_gate: gate });
+  }
+
+  /** Tasks whose pull request is still being watched; finished and cancelled ones are left alone. */
+  openPrGates(project?: string): Task[] {
+    const statuses: TaskStatus[] = ["queued", "blocked", "running", "waiting", "review", "attention"];
+    const params: any[] = [...statuses];
+    let sql = `SELECT * FROM tasks WHERE pr_gate IS NOT NULL AND status IN (${statuses.map(() => "?").join(",")})`;
+    if (project) {
+      sql += " AND project = ?";
+      params.push(project);
+    }
+    sql += " ORDER BY id ASC";
+    return this.db
+      .query(sql)
+      .all(...params)
+      .map((r) => this.row(r)!);
   }
 
   /* ---------- replies: the human answering an agent ---------- */

@@ -104,6 +104,14 @@ export interface GlobalConfig {
     command: string;
     events: string[];
   };
+  prReview: {
+    /** Queue a review task whenever a task opens a pull request. */
+    enabled: boolean;
+    /** Agent that shepherds the pull request until the human decides. */
+    agent: string;
+    /** Seconds between checks of an open pull request. */
+    pollSec: number;
+  };
 }
 
 export const GLOBAL_DEFAULTS: GlobalConfig = {
@@ -114,6 +122,7 @@ export const GLOBAL_DEFAULTS: GlobalConfig = {
   architect: { maxRounds: 4, maxOpenTasks: 300, maxItemsPerReview: 12, maxSubtasks: 30, model: "" },
   budgets: { taskUsd: 5, dailyUsd: 40, agentAttentionRate: 0.5, agentWindow: 10 },
   notifications: { webhook: "", command: "", events: ["attention", "failed", "cancelled", "digest", "budget", "agent-health", "worker"] },
+  prReview: { enabled: true, agent: "pr-gate", pollSec: 300 },
 };
 
 export function configDir(): string {
