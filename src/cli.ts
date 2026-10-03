@@ -1,7 +1,8 @@
 #!/usr/bin/env bun
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { addTask, approveTask, cancelTask, editTask, rejectTask, replyToTask, retryTask, viewProposal } from "./actions.ts";
+import { addTask, approveTask, cancelProjectTasks, cancelTask, editTask, rejectTask, replyToTask, retryTask, viewProposal } from "./actions.ts";
+import { approveProposal, commentOnProposal, dismissProposal, reopenProposal, syncProposals } from "./proposal-sync.ts";
 import { architectReview, latestDigest } from "./architect.ts";
 import { claudeReachable } from "./claude.ts";
 import { loadConfig, loadEnvFile, type Config } from "./config.ts";
@@ -34,6 +35,7 @@ Queue (the normal way to hand work to the system):
   agentpipe show ID                           # full record, events, replies, children
   agentpipe reply ID "answer" [--no-requeue]  # answer a task that stopped (attention/failed/cancelled); it is requeued and the agent continues with your reply
   agentpipe retry ID | cancel ID [--reason "why"] | prio ID N   # cancelled = impossible or moot; leaves "needs you", stays in history
+  agentpipe cancel --all [--project P] [--reason "why"]   # cancel every open task of a project (a plan gone wrong; restart from a clean queue)
   agentpipe edit ID [--title T] [--description TEXT | --desc-file F] [--accept "a;b"] [--agent NAME] [--priority N] [--files a,b]   # change what a task asks for (not while running)
   agentpipe approve ID | reject ID [--reason "why"]   # decide a confirmation request (github, agent-creator): approve runs the listed steps as you
   agentpipe worker [--once] [--project P]     # drain the queue (normally a systemd user service)
@@ -47,8 +49,10 @@ Registry:
   agentpipe agents show NAME                  # manifest, prompt, verifier, tests, extra files
   agentpipe agents new NAME [--runtime claude|ollama|pipeline|shell] [--dir DIR] [--from ID]   # scaffold a package (--from: fill it in from a proposal)
   agentpipe agents test [NAME] [--e2e]        # bun test for one agent or all (--e2e runs the real agent on a scratch repo)
-  agentpipe agents proposals [--all]          # agents the architect wished it had (from tasks it could not fully delegate)
-  agentpipe agents dismiss ID                 # drop a proposal
+  agentpipe agents proposals [--all]          # agents the architect wished it had; each is a GitHub issue for you to discuss and decide
+  agentpipe agents approve ID | dismiss ID [--reason "why"] | reopen ID   # approve queues agent-creator to build it (or comment "approved" on the issue)
+  agentpipe agents comment ID "feedback"      # feedback for the architect, answered in the issue thread on its next wake-up
+  agentpipe agents thread ID | sync           # the discussion so far | publish new proposals and read the issues now
 
 Projects: streams of work. Each is a repository in its own directory, or a long-lived branch of
 another project. One queue and worker serve them all; the current project's tasks run first.
@@ -337,8 +341,16 @@ async function main() {
       break;
     }
     case "cancel": {
+      if (flags.all) {
+        const g = loadGlobalConfig();
+        const { name } = resolveProject(g, str(flags.project));
+        const r = cancelProjectTasks(new Store(), name, process.env.USER ?? "cli", str(flags.reason) ?? positional.join(" "));
+        console.log(r.note);
+        for (const t of r.cancelled) console.log(`  #${t.id} [${t.agent}] ${t.title}`);
+        break;
+      }
       const id = Number(positional[0]);
-      if (!Number.isInteger(id)) throw new Error('usage: agentpipe cancel ID [--reason "why"]');
+      if (!Number.isInteger(id)) throw new Error('usage: agentpipe cancel ID [--reason "why"]   |   agentpipe cancel --all [--project P] [--reason "why"]');
       const r = cancelTask(new Store(), id, process.env.USER ?? "cli", str(flags.reason) ?? positional.slice(1).join(" "));
       console.log(`#${id} cancelled${r.task.error ? `: ${r.task.error}` : ""}`);
       if (r.note) console.log(`note: ${r.note}`);
@@ -515,9 +527,9 @@ async function main() {
         console.log(`created:\n${files.map((f) => "  " + f).join("\n")}\n${from ? "The manifest is filled in from the proposal; the prompt is yours to write. " : ""}Edit them, then 'agentpipe agents' should list ${name} and 'agentpipe agents test ${name}' should pass.`);
       } else if (sub === "proposals") {
         const store = new Store();
-        const rows = store.proposals(flags.all ? undefined : "open").map(viewProposal);
+        const rows = store.proposals(flags.all ? undefined : ["open", "approved"]).map((r) => viewProposal(r, store));
         if (!rows.length) {
-          console.log(flags.all ? "no agent proposals recorded" : "no open agent proposals (--all shows dismissed and created ones)");
+          console.log(flags.all ? "no agent proposals recorded" : "no agent proposals under discussion (--all shows dismissed and created ones)");
           break;
         }
         for (const r of rows) {
@@ -527,13 +539,33 @@ async function main() {
           console.log(`   why: ${p.why}`);
           if (p.inputs) console.log(`   inputs: ${p.inputs}`);
           if (p.outputs) console.log(`   outputs: ${p.outputs}`);
-          if (r.status === "open") console.log(`   create it: agentpipe agents new ${p.name} --from ${r.id}`);
+          if (r.issue_url) console.log(`   issue: ${r.issue_url}${r.comments.length ? ` (${r.comments.length} comment(s), ${r.comments.filter((c) => !c.answered).length} unanswered)` : ""}`);
+          if (r.decided_by) console.log(`   ${r.status} by ${r.decided_by} ${fmtAge(r.decided_at)} ago${r.decision_note ? `: ${r.decision_note}` : ""}${r.creator_task ? ` (task #${r.creator_task})` : ""}`);
+          if (r.status === "open") console.log(`   decide: agentpipe agents approve ${r.id}   |   agentpipe agents dismiss ${r.id} --reason "..."   |   comment on the issue`);
         }
-      } else if (sub === "dismiss") {
+      } else if (sub === "approve" || sub === "dismiss" || sub === "reopen") {
         const id = Number(positional[0]);
-        if (!Number.isInteger(id)) throw new Error("usage: agentpipe agents dismiss PROPOSAL_ID");
-        const r = new Store().setProposalStatus(id, "dismissed");
-        console.log(`proposal #${id} (${r.name}) dismissed`);
+        if (!Number.isInteger(id)) throw new Error(`usage: agentpipe agents ${sub} PROPOSAL_ID [--reason "why"]`);
+        const store = new Store();
+        const by = process.env.USER ?? "cli";
+        const reason = str(flags.reason) ?? positional.slice(1).join(" ");
+        const r = sub === "approve" ? await approveProposal(store, g, id, by, { note: reason }) : sub === "dismiss" ? await dismissProposal(store, g, id, by, reason) : await reopenProposal(store, g, id, by);
+        for (const l of r.lines) console.log(l);
+      } else if (sub === "comment") {
+        const id = Number(positional.shift());
+        const text = positional.join(" ").trim();
+        if (!Number.isInteger(id) || !text) throw new Error('usage: agentpipe agents comment PROPOSAL_ID "feedback for the architect"');
+        for (const l of (await commentOnProposal(new Store(), g, id, process.env.USER ?? "cli", text)).lines) console.log(l);
+      } else if (sub === "sync") {
+        const lines = await syncProposals(new Store(), g);
+        console.log(lines.length ? lines.join("\n") : "proposals are in step with their issues; nothing to do");
+      } else if (sub === "thread") {
+        const id = Number(positional[0]);
+        const store = new Store();
+        const row = store.proposal(id);
+        if (!row) throw new Error("usage: agentpipe agents thread PROPOSAL_ID");
+        console.log(`#${row.id} ${row.name} [${row.status}]${row.issue_url ? ` ${row.issue_url}` : " (no issue yet; agentpipe agents sync publishes it)"}`);
+        for (const c of store.proposalComments(id)) console.log(`\n${c.ts.slice(0, 16).replace("T", " ")} ${c.author} (${c.source}${c.answered || c.source === "architect" ? "" : ", unanswered"}):\n${c.body}`);
       } else if (sub === "test") {
         const name = positional[0];
         const targets = name ? [requireAgent(reg, name)] : [...reg.agents.values()];
@@ -543,7 +575,7 @@ async function main() {
         if (!dirs.length) break;
         const proc = Bun.spawn(["bun", "test", ...dirs], { cwd: agentpipeRoot(), stdio: ["ignore", "inherit", "inherit"], env: { ...process.env, ...(flags.e2e ? { AGENTPIPE_E2E: "1" } : {}) } });
         process.exitCode = await proc.exited;
-      } else throw new Error("usage: agentpipe agents [list|show NAME|new NAME [--from ID]|test [NAME]|proposals [--all]|dismiss ID]");
+      } else throw new Error("usage: agentpipe agents [list|show NAME|new NAME [--from ID]|test [NAME]|proposals [--all]|approve ID|dismiss ID|reopen ID|comment ID TEXT|thread ID|sync]");
       break;
     }
 

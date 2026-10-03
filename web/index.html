@@ -149,6 +149,32 @@ details summary { cursor: pointer; color: var(--text-2); }
 .empty { color: var(--muted); font-style: italic; }
 .small { font-size: 13px; color: var(--text-2); }
 @media (max-width: 640px) { .tile .value { font-size: 24px; } th:nth-child(6), td:nth-child(6) { display: none; } }
+.tabs { display: flex; flex-wrap: wrap; gap: 6px; margin: 18px 0 0; border-bottom: 1px solid var(--line); }
+.tab { font: inherit; font-weight: 600; font-size: 14px; padding: 8px 14px; border: 1px solid transparent; border-bottom: none; border-radius: 8px 8px 0 0; background: none; color: var(--text-2); cursor: pointer; margin-bottom: -1px; }
+.tab:hover { background: var(--surface-2); }
+.tab.active { background: var(--surface-2); border-color: var(--line); color: var(--text); }
+.tab .n { font-weight: 500; font-size: 12px; color: var(--muted); margin-left: 6px; }
+.tab .n.needs { color: var(--critical-text); }
+.tab.paused { font-style: italic; }
+body[data-view="all"] .only-project { display: none; }
+body[data-view="project"] .only-all { display: none; }
+.project-head { border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; background: var(--surface-2); margin-top: 16px; }
+.project-head h3 { margin: 0 0 4px; font-size: 18px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.project-head .goal { margin: 6px 0 8px; }
+.project-head .facts { color: var(--text-2); font-size: 13px; }
+.controls { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin-top: 12px; }
+.controls form { display: inline-flex; gap: 6px; align-items: center; }
+.controls input[type=number] { font: inherit; width: 6em; padding: 5px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--surface); color: var(--text); }
+.controls .note { flex-basis: 100%; }
+.budget { margin-top: 12px; }
+.thread { margin: 8px 0 0; padding: 0; list-style: none; }
+.thread li { border-left: 3px solid var(--line); padding: 4px 10px; margin: 4px 0; background: var(--surface); border-radius: 0 6px 6px 0; font-size: 13px; white-space: pre-wrap; }
+.thread li.architect { border-left-color: var(--accent); }
+.thread li.unanswered { border-left-color: var(--warning); }
+.thread li .who { color: var(--muted); font-size: 12px; white-space: normal; }
+.proposal.approved { border-style: solid; border-color: var(--good); }
+.proposal textarea { min-height: 56px; margin-top: 8px; }
+.row-project { font-size: 12px; color: var(--muted); margin-right: 6px; }
 </style>
 </head>
 <body>
@@ -169,6 +195,10 @@ details summary { cursor: pointer; color: var(--text-2); }
   <div id="update"><strong>Update available.</strong> <span id="update-text"></span><button class="primary" type="button" id="upgrade">Upgrade now</button><span class="note" id="update-note"></span><div class="commits" id="update-commits"></div></div>
   <p class="small" id="secure-hint" hidden>To keep this page available while the box is down, open the <a id="https-link" href="#">HTTPS version</a> once and trust its certificate (<a href="/ca.crt">download</a>: Windows → Install Certificate → Current User → Trusted Root Certification Authorities).</p>
 
+  <nav class="tabs" id="tabs" aria-label="Projects"></nav>
+
+  <section class="only-project" id="project-panel"></section>
+
   <h2>Queue <button class="act primary" id="add-toggle" type="button">+ Add task</button></h2>
   <form class="panel" id="add-panel" autocomplete="off">
     <h3>Hand work to the architect</h3>
@@ -182,13 +212,18 @@ details summary { cursor: pointer; color: var(--text-2); }
     <div class="actions"><button class="primary" type="submit" id="add-submit">Queue it</button><button type="button" id="add-cancel">Close</button><span class="note" id="add-note"></span></div>
   </form>
   <div class="tiles" id="tiles"></div>
-  <div id="projects" class="small" style="margin-top:8px"></div>
+  <div class="only-all">
+    <div id="projects" class="small" style="margin-top:8px"></div>
+    <div class="controls" id="global-budgets"><form id="caps-form" autocomplete="off"><span class="small">Claude caps:</span> <label class="small">per day $<input type="number" name="dailyUsd" min="0" step="1"></label> <label class="small">per task $<input type="number" name="taskUsd" min="0" step="0.5"></label> <button type="submit">Save caps</button><span class="note"></span></form></div>
+  </div>
 
-  <h2>System checks</h2>
-  <div class="checks" id="checks"></div>
+  <div class="only-all">
+    <h2>System checks</h2>
+    <div class="checks" id="checks"></div>
 
-  <h2>Machine</h2>
-  <div class="meters" id="meters"></div>
+    <h2>Machine</h2>
+    <div class="meters" id="meters"></div>
+  </div>
 
   <h2>In flight</h2>
   <div id="inflight"></div>
@@ -209,13 +244,15 @@ details summary { cursor: pointer; color: var(--text-2); }
   <h2>Architect</h2>
   <div id="architect"></div>
 
-  <h2>Suggested agents</h2>
-  <p class="small">Agents the architect wished it had: work it could not delegate because no registered agent has the skill. Nothing is created automatically; scaffold one with the command shown, fill in its prompt, and retry the task.</p>
-  <div class="agents" id="proposals"></div>
+  <div class="only-all">
+    <h2>Suggested agents <button class="act" id="proposals-sync" type="button">Sync issues now</button></h2>
+    <p class="small" id="proposals-intro">Agents the architect wished it had: work it could not delegate because no registered agent has the skill. Each one is a GitHub issue; discuss it there or here, and the architect answers on its next wake-up. Approve (here, or by commenting "approved" on the issue) queues agent-creator to build it; nothing is created without your approval.</p>
+    <div class="agents" id="proposals"></div>
 
-  <h2>Agents</h2>
-  <p class="small" id="agents-intro"></p>
-  <div class="agents" id="agents"></div>
+    <h2>Agents</h2>
+    <p class="small" id="agents-intro"></p>
+    <div class="agents" id="agents"></div>
+  </div>
 
   <p class="meta" id="footer"></p>
 </main>
@@ -227,12 +264,18 @@ details summary { cursor: pointer; color: var(--text-2); }
   const OFF = "agentpipe-status-offline-since";
   const DRAFTS = "agentpipe-status-drafts";
   const OPEN = "agentpipe-status-open";
+  const TAB = "agentpipe-status-tab";
   let snapshot = null, online = null, historyLimit = 60, extraHistory = null, serverSha = null;
+  // Which tab is open: "all" (every project, machine checks, agents) or one project's name (its
+  // details and controls, only its tasks). Kept across reloads.
+  const store = { get(k, d) { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } }, set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} } };
+  let view = store.get(TAB, "all");
+  const projectHistory = {};
 
   // What the reader typed and what they had open survive a reload (theirs, or the one this page
   // does when the server was upgraded): drafts keyed by task id, plus the add form.
-  const store = { get(k, d) { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } }, set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} } };
   const drafts = store.get(DRAFTS, { add: {}, replies: {} });
+  drafts.proposals ??= {};
   const saveDrafts = () => store.set(DRAFTS, drafts);
   const openIds = () => [...document.querySelectorAll("tr.detail")].map((tr) => tr.dataset.id);
   const saveOpen = () => store.set(OPEN, openIds());
@@ -266,7 +309,7 @@ details summary { cursor: pointer; color: var(--text-2); }
 
   function tile(label, value, sub, cls = "") { return `<div class="tile ${cls}"><div class="label">${esc(label)}</div><div class="value">${esc(value)}</div><div class="sub">${esc(sub || "")}</div></div>`; }
   function meter(label, pct, right, cls) { return `<div class="meter ${cls || ""}"><div class="row"><span>${esc(label)}</span><b>${esc(right)}</b></div><div class="track"><div class="fill" style="width:${Math.max(0, Math.min(100, pct))}%"></div></div></div>`; }
-  function taskLine(t) { return `<tr class="row ${esc(t.status)}" data-id="${t.id}"><td class="id">#${t.id}</td><td>${badge(t.status)}</td><td>${esc(t.agent)}</td><td>${esc(t.title)}${t.pr_url ? ` · <a href="${esc(t.pr_url)}" target="_blank" rel="noopener">PR</a>` : t.branch ? ` <span class="small">(${esc(t.branch)})</span>` : ""}${t.ask && t.status === "attention" ? `<div class="ask">asks: ${esc(t.ask)}</div>` : t.error ? `<div class="small" style="color:var(--critical-text)">${esc(t.error)}</div>` : t.ask ? `<div class="ask">${esc(t.ask)}</div>` : ""}</td><td class="num">${esc(dur(t.durationSec))}</td><td class="num" title="${esc(when(t.finished_at || t.started_at || t.created_at))}">${esc(age(t.finished_at || t.started_at || t.created_at))}</td></tr>`; }
+  function taskLine(t) { return `<tr class="row ${esc(t.status)}" data-id="${t.id}"><td class="id">#${t.id}</td><td>${badge(t.status)}</td><td>${esc(t.agent)}</td><td>${view === "all" && snapshot && snapshot.queue.length > 1 ? `<span class="row-project">${esc(t.project)} ·</span>` : ""}${esc(t.title)}${t.pr_url ? ` · <a href="${esc(t.pr_url)}" target="_blank" rel="noopener">PR</a>` : t.branch ? ` <span class="small">(${esc(t.branch)})</span>` : ""}${t.ask && t.status === "attention" ? `<div class="ask">asks: ${esc(t.ask)}</div>` : t.error ? `<div class="small" style="color:var(--critical-text)">${esc(t.error)}</div>` : t.ask ? `<div class="ask">${esc(t.ask)}</div>` : ""}</td><td class="num">${esc(dur(t.durationSec))}</td><td class="num" title="${esc(when(t.finished_at || t.started_at || t.created_at))}">${esc(age(t.finished_at || t.started_at || t.created_at))}</td></tr>`; }
   const thead = `<thead><tr><th>id</th><th>status</th><th>agent</th><th>task</th><th class="num">took</th><th class="num">when</th></tr></thead>`;
   function table(rows, empty) { return rows.length ? `<table>${thead}<tbody>${rows.map(taskLine).join("")}</tbody></table>` : `<p class="empty">${esc(empty)}</p>`; }
 
@@ -293,19 +336,39 @@ details summary { cursor: pointer; color: var(--text-2); }
     document.title = s.host.name + " status";
     $("#webui-link").href = `http://${location.hostname}:8080/`;
     $("#updated").textContent = "data from " + when(s.ts) + (online ? "" : " (stale)");
-    const c = s.totals;
+    // Tabs: every project the server knows plus "All projects". A project that vanished (archived, removed) falls back to all.
+    if (view !== "all" && !s.queue.some((q) => q.project === view)) { view = "all"; store.set(TAB, view); }
+    document.body.dataset.view = view === "all" ? "all" : "project";
+    const needsOf = (q) => q.counts.attention + q.counts.failed + q.counts.blocked;
+    $("#tabs").innerHTML = [`<button type="button" class="tab${view === "all" ? " active" : ""}" data-tab="all">All projects<span class="n">${s.totals.queued + s.totals.running + s.totals.waiting + s.totals.review} open</span></button>`]
+      .concat(s.queue.map((q) => `<button type="button" class="tab${view === q.project ? " active" : ""}${q.status === "paused" ? " paused" : ""}" data-tab="${esc(q.project)}" title="${esc(q.goal || q.path)}">${esc(q.project)}${q.current ? " *" : ""}${needsOf(q) ? `<span class="n needs">${needsOf(q)} need you</span>` : q.open ? `<span class="n">${q.open} open</span>` : q.status !== "active" ? `<span class="n">${esc(q.status)}</span>` : ""}</button>`)).join("");
+    const focus = view === "all" ? null : s.queue.find((q) => q.project === view);
+    // A snapshot saved by an older page may predate per-project budgets.
+    for (const q of s.queue) { q.budget ??= { todayUsd: 0, weekUsd: 0, dailyUsd: 0 }; q.open ??= q.counts.queued + q.counts.blocked + q.counts.running + q.counts.waiting + q.counts.review; }
+    const c = focus ? focus.counts : s.totals;
     const needs = c.attention + c.failed + c.blocked;
+    const scope = focus ? [focus] : s.queue;
+    const todayUsd = focus ? focus.budget.todayUsd : s.budgets ? s.budgets.todayUsd : null;
+    const cap = focus ? (focus.budget.dailyUsd || (s.budgets ? s.budgets.dailyCapUsd : 0)) : s.budgets ? s.budgets.dailyCapUsd : 0;
+    const weekUsd = focus ? focus.budget.weekUsd : s.budgets ? s.budgets.weekUsd : 0;
     $("#tiles").innerHTML = [
       tile("Queued", c.queued, c.blocked ? `${c.blocked} blocked` : ""),
-      tile("Running", c.running, s.queue.flatMap((q) => q.running).map((t) => "#" + t.id).join(", ")),
+      tile("Running", c.running, scope.flatMap((q) => q.running).map((t) => "#" + t.id).join(", ")),
       tile("Waiting on children", c.waiting + c.review, c.review ? `${c.review} ready for the architect` : ""),
       tile("Needs you", needs, needs ? `${c.attention} attention, ${c.failed} failed, ${c.blocked} blocked` : "nothing", needs ? "needs" : ""),
       tile("Done", c.done, c.cancelled ? `all time · ${c.cancelled} cancelled` : "all time"),
-      tile("Claude today", s.budgets ? "$" + s.budgets.todayUsd.toFixed(2) : "?", s.budgets ? (s.budgets.dailyCapUsd ? `of $${s.budgets.dailyCapUsd} · $${s.budgets.weekUsd.toFixed(2)} this week` : `$${s.budgets.weekUsd.toFixed(2)} this week`) : ""),
+      tile("Claude today", todayUsd == null ? "?" : "$" + todayUsd.toFixed(2), `${cap ? `of $${cap}${focus && !focus.budget.dailyUsd ? " (global cap)" : ""} · ` : ""}$${weekUsd.toFixed(2)} this week`, cap && todayUsd >= cap ? "needs" : ""),
     ].join("");
-    fillSelect($("#add-project"), s.queue.map((q) => q.project), s.queue.find((q) => q.current)?.project);
+    renderProjectPanel(focus, s);
+    if (s.budgets) {
+      const caps = $("#caps-form");
+      if (document.activeElement !== caps.dailyUsd) caps.dailyUsd.value = s.budgets.dailyCapUsd || "";
+      if (document.activeElement !== caps.taskUsd) caps.taskUsd.value = s.budgets.taskCapUsd || "";
+    }
+    fillSelect($("#add-project"), s.queue.map((q) => q.project), focus ? focus.project : s.queue.find((q) => q.current)?.project);
+    if (focus && $("#add-project").value !== focus.project) $("#add-project").value = focus.project;
     fillSelect($("#add-agent"), (s.agents || []).map((a) => a.name).sort((a, b) => (a === "architect" ? -1 : b === "architect" ? 1 : a.localeCompare(b))), "architect");
-    $("#projects").innerHTML = s.queue.map((q) => `<b>${esc(q.project)}</b>${q.current ? " (current)" : ""}${q.status && q.status !== "active" ? ` <span class="meta">[${esc(q.status)}]</span>` : ""}: ${Object.entries(q.counts).filter(([, n]) => n).map(([k, n]) => `${n} ${k}`).join(", ") || "empty"} <span class="meta">(${esc(q.path)}${q.branch ? ", branch " + esc(q.branch) : ""}${q.push ? ", PRs on" : ", PRs off"})</span>${q.goal ? `<br><span class="meta">${esc(q.goal)}</span>` : ""}`).join("<br>")
+    $("#projects").innerHTML = s.queue.map((q) => `<a href="#" data-tab="${esc(q.project)}"><b>${esc(q.project)}</b></a>${q.current ? " (current)" : ""}${q.status && q.status !== "active" ? ` <span class="meta">[${esc(q.status)}]</span>` : ""}: ${Object.entries(q.counts).filter(([, n]) => n).map(([k, n]) => `${n} ${k}`).join(", ") || "empty"}${q.budget ? ` <span class="meta">· $${q.budget.todayUsd.toFixed(2)} today${q.budget.dailyUsd ? ` of $${q.budget.dailyUsd}` : ""}</span>` : ""} <span class="meta">(${esc(q.path)}${q.branch ? ", branch " + esc(q.branch) : ""}${q.push ? ", PRs on" : ", PRs off"})</span>`).join("<br>")
       + (s.lanes ? `<br>lanes: ${s.lanes.map((l) => `${esc(l.lane)} ${l.running.length}/${l.slots}${l.running.length ? " (#" + l.running.join(", #") + ")" : ""}`).join(" · ")}` : "");
     $("#checks").innerHTML = s.checks.map((k) => `<div class="check ${k.level}"><div class="ico" aria-hidden="true">${k.ok ? "✓" : k.level === "warning" ? "!" : "✕"}</div><div><div class="name">${esc(k.name)} <span class="small">· ${k.ok ? "ok" : k.level}</span></div><div class="detail">${esc(k.detail)}</div></div></div>`).join("");
     const m = s.host.mem, memPct = Math.round((m.usedBytes / m.totalBytes) * 100);
@@ -320,9 +383,9 @@ details summary { cursor: pointer; color: var(--text-2); }
     for (const d of s.disks) meters.push(meter("Disk " + d.mount, d.usedPct, `${d.usedPct}% of ${bytes(d.totalBytes)}`, d.usedPct >= 95 ? "crit" : d.usedPct >= 85 ? "warn" : ""));
     if (s.ollama) meters.push(`<div class="meter"><div class="row"><span>Ollama models</span><b>${s.ollama.loaded.length ? "loaded: " + esc(s.ollama.loaded.join(", ")) : "idle"}</b></div><div class="small">${s.ollama.models.map((x) => esc(x.name)).join(", ")}</div></div>`);
     $("#meters").innerHTML = meters.join("");
-    const inflight = s.queue.flatMap((q) => [...q.running, ...q.next]);
-    setTable($("#inflight"), inflight, "queue is empty");
-    const needsYou = s.queue.flatMap((q) => q.needsYou);
+    const inflight = scope.flatMap((q) => [...q.running, ...q.next]);
+    setTable($("#inflight"), inflight, focus ? `${focus.project} has nothing queued or running` : "queue is empty");
+    const needsYou = scope.flatMap((q) => q.needsYou);
     setTable($("#needsyou"), needsYou, "nothing waiting on a human");
     const u = s.update;
     $("#update").classList.toggle("show", Boolean(u && u.available));
@@ -331,17 +394,10 @@ details summary { cursor: pointer; color: var(--text-2); }
       $("#update-commits").textContent = u.commits.join(" · ");
     }
     renderHistory();
-    $("#architect").innerHTML = s.queue.map((q) => `<div class="small">${esc(q.project)}: last review ${q.lastReview ? when(q.lastReview) + " (" + age(q.lastReview) + " ago)" : "never"}${q.push ? " · pull requests on" : " · pull requests off"}</div>`).join("")
+    $("#architect").innerHTML = scope.map((q) => `<div class="small">${esc(q.project)}: last review ${q.lastReview ? when(q.lastReview) + " (" + age(q.lastReview) + " ago)" : "never"}${q.push ? " · pull requests on" : " · pull requests off"}</div>`).join("")
       + (s.architect.timer ? `<div class="small">timer ${s.architect.timer.active ? "active, next " + esc(s.architect.timer.next) : "inactive"}</div>` : "")
-      + (s.architect.digestExcerpt ? `<details open><summary>Latest digest (${esc(when(s.architect.digestAt))})</summary><pre>${esc(s.architect.digestExcerpt)}</pre></details>` : `<p class="empty">no digest yet</p>`);
-    $("#proposals").innerHTML = (s.proposals || []).length ? s.proposals.map((p) => {
-      const a = p.proposal || {};
-      return `<div class="agent proposal" data-pid="${p.id}"><div class="head"><b>${esc(p.name)}</b><span class="tag">${esc(a.runtime || "?")}</span>${a.commits ? `<span class="tag on">commits</span>` : ""}${a.shell && a.shell.length ? `<span class="tag">shell: ${esc(a.shell.join(", "))}</span>` : ""}${p.times > 1 ? `<span class="tag">asked ${p.times}×</span>` : ""}</div>
-        <div>${esc(a.description || "")}</div><div class="why small"><b>why:</b> ${esc(a.why || "")}</div>
-        ${a.inputs ? `<div class="small"><b>task must include:</b> ${esc(a.inputs)}</div>` : ""}${a.outputs ? `<div class="small"><b>produces:</b> ${esc(a.outputs)}</div>` : ""}
-        <div class="stats">proposed ${esc(age(p.ts))} ago by ${esc(p.proposed_by)}${p.task_id ? ` for #${p.task_id}` : ""}${p.project ? ` in ${esc(p.project)}` : ""}</div>
-        <div class="actions"><code>agentpipe agents new ${esc(p.name)} --from ${p.id}</code><button type="button" data-action="dismiss" data-pid="${p.id}">Dismiss</button><span class="note"></span></div></div>`;
-    }).join("") : `<p class="empty">none open</p>`;
+      + (s.architect.digestExcerpt ? `<details${focus ? "" : " open"}><summary>Latest digest (${esc(when(s.architect.digestAt))})</summary><pre>${esc(s.architect.digestExcerpt)}</pre></details>` : `<p class="empty">no digest yet</p>`);
+    renderProposals(s);
     $("#agents-intro").textContent = `${s.agents.length} agents registered. The architect chooses among them by description; each one advertises one skill, verifies its own output, and reports done, attention, failed or cancelled.`;
     $("#agents").innerHTML = s.agents.map((a) => {
       const st = a.stats || {};
@@ -380,6 +436,58 @@ details summary { cursor: pointer; color: var(--text-2); }
   function fillSelect(sel, names, preferred) {
     const cur = sel.value || preferred || "";
     sel.innerHTML = names.map((n) => `<option${n === cur ? " selected" : ""}>${esc(n)}</option>`).join("");
+  }
+
+  // One project's details and controls. Rebuilt only when its data changed, so a half-typed cap survives polls.
+  function renderProjectPanel(q, s) {
+    const panel = $("#project-panel");
+    if (!q) { panel.innerHTML = ""; panel.dataset.html = ""; return; }
+    const cap = q.budget.dailyUsd || (s.budgets ? s.budgets.dailyCapUsd : 0);
+    const pct = cap ? (q.budget.todayUsd / cap) * 100 : 0;
+    const html = `<div class="project-head" data-project="${esc(q.project)}">
+      <h3>${esc(q.project)} ${badge(q.status)}${q.current ? `<span class="tag">current project</span>` : ""}${q.push ? `<span class="tag on">pull requests on</span>` : `<span class="tag">pull requests off</span>`}</h3>
+      ${q.goal ? `<div class="goal">${esc(q.goal)}</div>` : `<div class="goal empty">no goal recorded</div>`}
+      <div class="facts">${esc(q.path)} · ${q.branch ? "branch " + esc(q.branch) : "base " + esc(q.base)}${q.repo ? ` · <a href="https://github.com/${esc(q.repo.replace(/^https:\/\/github\.com\//, ""))}" target="_blank" rel="noopener">${esc(q.repo)}</a>` : ""}${q.upstreams && q.upstreams.length ? ` · upstreams: ${q.upstreams.map((u) => `${esc(u.name)} (${esc(u.repo)}${u.sha ? " @ " + esc(u.sha.slice(0, 7)) : ""})`).join(", ")}` : ""}</div>
+      ${q.pending && q.pending.length ? `<div class="ask">Held for approval: <code>${q.pending.map(esc).join("</code>, <code>")}</code> (agentpipe projects approve ${esc(q.project)})</div>` : ""}
+      <div class="facts" style="margin-top:6px">${Object.entries(q.counts).filter(([, n]) => n).map(([k, n]) => `${n} ${k}`).join(", ") || "no tasks yet"} · last architect review ${q.lastReview ? age(q.lastReview) + " ago" : "never"}</div>
+      <div class="budget">${meter("Claude today" + (q.budget.dailyUsd ? "" : cap ? " (global cap)" : " (no cap)"), pct, `$${q.budget.todayUsd.toFixed(2)}${cap ? ` / $${cap}` : ""} · $${q.budget.weekUsd.toFixed(2)} this week`, pct >= 100 ? "crit" : pct >= 80 ? "warn" : "")}</div>
+      <div class="controls">
+        <form class="budget-form" data-project="${esc(q.project)}" autocomplete="off"><label class="small">this project's daily cap $<input type="number" name="dailyUsd" min="0" step="1" value="${q.budget.dailyUsd || ""}" placeholder="none"></label><button type="submit">Save cap</button></form>
+        ${q.current ? "" : `<button type="button" data-paction="use" data-project="${esc(q.project)}">Make current</button>`}
+        ${q.status === "paused" ? `<button type="button" data-paction="resume" data-project="${esc(q.project)}">Resume</button>` : q.status === "active" ? `<button type="button" data-paction="pause" data-project="${esc(q.project)}">Pause</button>` : ""}
+        <button type="button" class="danger" data-paction="cancel-open" data-project="${esc(q.project)}"${q.open + q.counts.attention + q.counts.failed ? "" : " disabled"}>Cancel all open tasks (${q.open + q.counts.attention + q.counts.failed})</button>
+        <span class="note"></span>
+      </div></div>`;
+    if (panel.dataset.html !== html) {
+      const typed = panel.querySelector("form.budget-form input")?.value;
+      const focused = document.activeElement && panel.contains(document.activeElement);
+      panel.innerHTML = html;
+      panel.dataset.html = html;
+      if (focused && typed !== undefined) { const i = panel.querySelector("form.budget-form input"); i.value = typed; i.focus(); }
+    }
+  }
+
+  // Suggested agents: each proposal with its GitHub issue, the discussion so far, and the decisions.
+  function renderProposals(s) {
+    const box = $("#proposals");
+    const list = s.proposals || [];
+    const html = list.length ? list.map((p) => {
+      const a = p.proposal || {};
+      const thread = (p.comments || []).map((c) => `<li class="${c.source === "architect" ? "architect" : c.answered ? "" : "unanswered"}"><div class="who">${esc(c.author)} · ${esc(c.source === "issue" ? "on the issue" : c.source === "web" ? "from this page" : "architect")} · ${esc(when(c.ts))}${c.source !== "architect" && !c.answered ? " · awaiting the architect" : ""}</div>${esc(c.body)}</li>`).join("");
+      return `<div class="agent proposal ${esc(p.status)}" data-pid="${p.id}"><div class="head"><b>${esc(p.name)}</b><span class="tag">${esc(a.runtime || "?")}</span>${a.commits ? `<span class="tag on">commits</span>` : ""}${a.shell && a.shell.length ? `<span class="tag">shell: ${esc(a.shell.join(", "))}</span>` : ""}${p.times > 1 ? `<span class="tag">asked ${p.times}×</span>` : ""}${p.status !== "open" ? `<span class="tag on">${esc(p.status)}</span>` : ""}</div>
+        <div>${esc(a.description || "")}</div><div class="why small"><b>why:</b> ${esc(a.why || "")}</div>
+        ${a.inputs ? `<div class="small"><b>task must include:</b> ${esc(a.inputs)}</div>` : ""}${a.outputs ? `<div class="small"><b>produces:</b> ${esc(a.outputs)}</div>` : ""}
+        <div class="stats">proposed ${esc(age(p.ts))} ago by ${esc(p.proposed_by)}${p.task_id ? ` for #${p.task_id}` : ""}${p.project ? ` in ${esc(p.project)}` : ""} · ${p.issue_url ? `<a href="${esc(p.issue_url)}" target="_blank" rel="noopener">issue #${p.issue_number}</a>` : s.proposalsRepo === "off" ? "issues off" : "no issue yet (next sync)"}${p.status === "approved" ? ` · approved by ${esc(p.decided_by)}${p.creator_task ? `, agent-creator task #${p.creator_task}` : ""}` : ""}</div>
+        ${thread ? `<ul class="thread">${thread}</ul>` : ""}
+        ${p.status === "open" ? `<form class="proposal-comment" data-pid="${p.id}"><textarea name="text" placeholder="Feedback for the architect: questions, changes to the specification, why this is or is not needed. It answers in the issue thread on its next wake-up."></textarea>
+        <div class="actions"><button class="primary" type="button" data-action="approve-proposal" data-pid="${p.id}">Approve: build it</button><button type="submit">Send feedback</button><button type="button" class="danger" data-action="dismiss" data-pid="${p.id}">Dismiss</button><span class="note"></span></div></form>` : `<div class="actions"><span class="note">agent-creator writes the package; approve its confirmation under Needs you when it asks.</span></div>`}</div>`;
+    }).join("") : `<p class="empty">none under discussion</p>`;
+    if (box.dataset.html === html) return;
+    const typed = {};
+    for (const ta of box.querySelectorAll("form.proposal-comment textarea")) if (ta.value) typed[ta.closest("form").dataset.pid] = ta.value;
+    box.innerHTML = html;
+    box.dataset.html = html;
+    for (const ta of box.querySelectorAll("form.proposal-comment textarea")) { const id = ta.closest("form").dataset.pid; if (typed[id] ?? drafts.proposals[id]) ta.value = typed[id] ?? drafts.proposals[id]; }
   }
 
   async function api(path, body) {
@@ -428,11 +536,31 @@ details summary { cursor: pointer; color: var(--text-2); }
       <details><summary>events (${d.events.length})</summary><pre>${d.events.map((e) => esc(e.ts.slice(0, 19) + " " + e.kind + ": " + e.message)).join("\n")}</pre></details></td>`;
   }
 
+  // The rows the history shows: everything (or the loaded-more set) on the All tab; a project's own
+  // finished tasks on its tab, fetched per poll.
+  function historyRows() {
+    if (view === "all") return extraHistory || snapshot.history;
+    return projectHistory[view] || snapshot.history.filter((t) => t.project === view);
+  }
   function renderHistory() {
     if (!snapshot) return;
-    const rows = (extraHistory || snapshot.history).filter((t) => (!$("#f-status").value || t.status === $("#f-status").value) && (!$("#f-agent").value || t.agent === $("#f-agent").value) && (!$("#f-q").value || t.title.toLowerCase().includes($("#f-q").value.toLowerCase())));
+    const rows = historyRows().filter((t) => (!$("#f-status").value || t.status === $("#f-status").value) && (!$("#f-agent").value || t.agent === $("#f-agent").value) && (!$("#f-q").value || t.title.toLowerCase().includes($("#f-q").value.toLowerCase())));
     setTable($("#history"), rows, "no finished tasks yet");
     $("#hist-count").textContent = `${rows.length} shown`;
+  }
+  async function loadProjectHistory(name) {
+    try {
+      const r = await (await fetch(`/api/history?project=${encodeURIComponent(name)}&limit=300`, { cache: "no-store", signal: AbortSignal.timeout(8000) })).json();
+      projectHistory[name] = r.history;
+      if (view === name) renderHistory();
+    } catch {}
+  }
+  function setView(v) {
+    view = v;
+    store.set(TAB, v);
+    if (snapshot) render(snapshot);
+    if (v !== "all") loadProjectHistory(v);
+    window.scrollTo({ top: 0 });
   }
 
   async function poll() {
@@ -441,6 +569,7 @@ details summary { cursor: pointer; color: var(--text-2); }
       const res = await fetch(`/api/status?history=${historyLimit}`, { cache: "no-store", signal: AbortSignal.timeout(8000) });
       if (!res.ok) throw new Error(res.status);
       snapshot = await res.json();
+      if (view !== "all") loadProjectHistory(view);
       try { localStorage.setItem(KEY, JSON.stringify(snapshot)); } catch {}
       setOnline(true);
       // The server was upgraded under this page: load the new page. Drafts and open rows are saved.
@@ -485,12 +614,33 @@ details summary { cursor: pointer; color: var(--text-2); }
   document.addEventListener("input", (ev) => {
     const el = ev.target;
     if (el.matches("form.reply-form textarea")) { const id = el.closest("form").dataset.id; if (el.value) drafts.replies[id] = el.value; else delete drafts.replies[id]; saveDrafts(); }
+    else if (el.matches("form.proposal-comment textarea")) { const id = el.closest("form").dataset.pid; if (el.value) drafts.proposals[id] = el.value; else delete drafts.proposals[id]; saveDrafts(); }
     else if (el.id === "add-desc" || el.id === "add-accept" || el.id === "add-prio") { drafts.add[el.id] = el.value; saveDrafts(); }
   });
 
   function setNote(el, text, err) { if (!el) return; el.textContent = text || ""; el.classList.toggle("err", Boolean(err)); }
 
   document.addEventListener("click", async (ev) => {
+    const tab = ev.target.closest("[data-tab]");
+    if (tab) { ev.preventDefault(); setView(tab.dataset.tab); return; }
+    const pbtn = ev.target.closest("button[data-paction]");
+    if (pbtn) {
+      ev.preventDefault();
+      const note = pbtn.parentElement.querySelector(".note"), name = pbtn.dataset.project, action = pbtn.dataset.paction;
+      try {
+        pbtn.disabled = true;
+        let body = {};
+        if (action === "cancel-open") {
+          const reason = prompt(`Cancel every open task of ${name}? Queued, blocked, waiting, attention and failed tasks are all cancelled; a running one finishes its current call, then stops. Optionally say why.`, "");
+          if (reason === null) { pbtn.disabled = false; return; }
+          body = { reason };
+        } else if (action === "pause" && !confirm(`Pause ${name}? Its tasks stay queued but nothing of its runs until you resume it.`)) { pbtn.disabled = false; return; }
+        const r = await api(`/api/project/${encodeURIComponent(name)}/${action}`, body);
+        setNote(note, r.note);
+        await poll();
+      } catch (e) { setNote(note, String(e.message || e), true); pbtn.disabled = false; }
+      return;
+    }
     const btn = ev.target.closest("button[data-action]");
     if (btn) {
       ev.preventDefault();
@@ -498,7 +648,21 @@ details summary { cursor: pointer; color: var(--text-2); }
       const id = btn.dataset.id, action = btn.dataset.action;
       try {
         btn.disabled = true;
-        if (action === "dismiss") { await api(`/api/proposal/${btn.dataset.pid}/dismiss`); btn.closest(".proposal").remove(); if (!$("#proposals").children.length) $("#proposals").innerHTML = `<p class="empty">none open</p>`; return; }
+        if (action === "dismiss") {
+          const reason = prompt(`Dismiss this proposal? Its issue is closed as not planned. Optionally say why.`, "");
+          if (reason === null) { btn.disabled = false; return; }
+          const r = await api(`/api/proposal/${btn.dataset.pid}/dismiss`, { reason });
+          setNote(note, r.note);
+          await poll();
+          return;
+        }
+        if (action === "approve-proposal") {
+          if (!confirm(`Approve this agent? agent-creator is queued to write the package; you approve the files it proposes before anything is installed.`)) { btn.disabled = false; return; }
+          const r = await api(`/api/proposal/${btn.dataset.pid}/approve`, {});
+          setNote(note, r.note);
+          await poll();
+          return;
+        }
         if (action === "cancel") {
           const reason = prompt(`Cancel #${id}? Optionally say why (kept as the task's reason).`, "");
           if (reason === null) { btn.disabled = false; return; }
@@ -531,6 +695,41 @@ details summary { cursor: pointer; color: var(--text-2); }
   });
 
   document.addEventListener("submit", async (ev) => {
+    const budget = ev.target.closest("form.budget-form");
+    if (budget) {
+      ev.preventDefault();
+      const note = budget.parentElement.querySelector(".note");
+      try {
+        const r = await api(`/api/project/${encodeURIComponent(budget.dataset.project)}/budget`, { dailyUsd: budget.dailyUsd.value || 0 });
+        setNote(note, r.note);
+        await poll();
+      } catch (e) { setNote(note, String(e.message || e), true); }
+      return;
+    }
+    if (ev.target.id === "caps-form") {
+      ev.preventDefault();
+      const f = ev.target, note = f.querySelector(".note");
+      try {
+        const r = await api("/api/budgets", { dailyUsd: f.dailyUsd.value || 0, taskUsd: f.taskUsd.value || 0 });
+        setNote(note, r.note);
+        await poll();
+      } catch (e) { setNote(note, String(e.message || e), true); }
+      return;
+    }
+    const pc = ev.target.closest("form.proposal-comment");
+    if (pc) {
+      ev.preventDefault();
+      const note = pc.querySelector(".note"), text = pc.querySelector("textarea").value.trim();
+      if (!text) { setNote(note, "write something first", true); return; }
+      try {
+        const r = await api(`/api/proposal/${pc.dataset.pid}/comment`, { text });
+        delete drafts.proposals[pc.dataset.pid]; saveDrafts();
+        pc.querySelector("textarea").value = "";
+        setNote(note, r.note);
+        await poll();
+      } catch (e) { setNote(note, String(e.message || e), true); }
+      return;
+    }
     const edit = ev.target.closest("form.edit-form");
     if (edit) {
       ev.preventDefault();
@@ -595,6 +794,16 @@ details summary { cursor: pointer; color: var(--text-2); }
   $("#refresh").addEventListener("click", (e) => { e.preventDefault(); poll(); });
   for (const id of ["#f-status", "#f-agent"]) $(id).addEventListener("change", renderHistory);
   $("#f-q").addEventListener("input", renderHistory);
+  $("#proposals-sync").addEventListener("click", async () => {
+    const btn = $("#proposals-sync");
+    try {
+      btn.disabled = true;
+      const r = await api("/api/proposals/sync", {});
+      $("#proposals-intro").textContent = r.lines.length ? r.lines.join(" · ") : "Issues and proposals are in step; nothing to do.";
+      await poll();
+    } catch (e) { $("#proposals-intro").textContent = String(e.message || e); }
+    finally { btn.disabled = false; }
+  });
   $("#more").addEventListener("click", async () => {
     try { extraHistory = (await (await fetch(`/api/history?limit=1000`, { signal: AbortSignal.timeout(10000) })).json()).history; renderHistory(); } catch {}
   });

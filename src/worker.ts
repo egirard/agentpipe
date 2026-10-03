@@ -405,7 +405,17 @@ async function pruneWorktrees(store: Store, gcfg: GlobalConfig, name: string, pr
 }
 
 /** Record the outcome, create subtasks, wake the parent if this was its last child, notify. */
-function finish(store: Store, gcfg: GlobalConfig, task: Task, outcome: RunOutcome | null, error: string | null, registry?: Registry) {
+export function finish(store: Store, gcfg: GlobalConfig, task: Task, outcome: RunOutcome | null, error: string | null, registry?: Registry) {
+  // A human cancelled the task while it ran (one task, or a whole project): the late result is kept
+  // for the record, but it changes nothing: no status, no subtasks, no proposals, no pull request gate.
+  const current = store.get(task.id);
+  if (current?.status === "cancelled") {
+    const summary = outcome ? clip(outcome.result.summary, 30_000) : null;
+    store.update(task.id, { ...(summary ? { summary } : {}), run_dir: outcome?.runDir ?? task.run_dir, branch: outcome?.branch ?? task.branch });
+    store.event(task.id, "run", `finished after being cancelled: agent reported ${outcome ? outcome.result.status : `error: ${error}`}; ${outcome?.result.subtasks.length ? `${outcome.result.subtasks.length} subtask(s) not created` : "nothing created"}`);
+    log(`worker: #${task.id} was cancelled while running; its result is recorded and ignored`);
+    return;
+  }
   let status: string;
   if (!outcome) {
     const transient = error && task.attempts < gcfg.worker.maxAttempts && /ECONNREFUSED|ollama|timed out|non-JSON|rate limit|overloaded/i.test(error) && !/^budget/.test(error);

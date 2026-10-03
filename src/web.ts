@@ -1,9 +1,10 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { addTask, approveTask, cancelTask, editTask, rejectTask, replyToTask, retryTask, viewProposal } from "./actions.ts";
+import { addTask, approveTask, cancelProjectTasks, cancelTask, editTask, makeCurrentProject, rejectTask, replyToTask, retryTask, setGlobalBudgets, setProjectBudget, setProjectStatus, viewProposal } from "./actions.ts";
 import { latestDigest } from "./architect.ts";
 import { agentpipeRoot, currentProject, dataDir, loadGlobalConfig, projectStatus, type GlobalConfig } from "./global.ts";
+import { approveProposal, commentOnProposal, dismissProposal, reopenProposal, syncProposals } from "./proposal-sync.ts";
 import { loadRegistry } from "./registry.ts";
 import type { Store, Task } from "./store.ts";
 import { checkForUpdate, runUpgrade } from "./upgrade.ts";
@@ -20,9 +21,10 @@ import { clip, log, setLogFile, sh } from "./util.ts";
  * the browser trusts once (download it from /ca.crt).
  *
  * Besides reading, the page can do what the CLI does to the queue: add a task, reply to one that
- * asked something, retry, cancel, dismiss an agent proposal. Those are POSTs with a JSON body and
- * are accepted only from the page's own origin (or a non-browser client): a form on some other
- * site cannot send a JSON body without a preflight, and the preflight is refused.
+ * asked something, retry, cancel, cancel every open task of a project, pause or resume a project,
+ * set its budget, decide or discuss an agent proposal. Those are POSTs with a JSON body and are
+ * accepted only from the page's own origin (or a non-browser client): a form on some other site
+ * cannot send a JSON body without a preflight, and the preflight is refused.
  */
 
 export interface WebOpts {
@@ -189,15 +191,23 @@ export async function collectStatus(store: Store, gcfg: GlobalConfig, o: WebOpts
   const projects = Object.keys(gcfg.projects)
     .filter((p) => projectStatus(gcfg.projects[p]) !== "archived")
     .sort((a, b) => Number(b === current) - Number(a === current));
+  const weekAll = store.spend(new Date(Date.now() - 7 * 86400_000).toISOString());
   const queue = projects.map((p) => ({
     project: p,
     path: gcfg.projects[p].path,
     push: gcfg.projects[p].push,
     current: p === current,
     status: gcfg.projects[p].pending?.length ? "held" : projectStatus(gcfg.projects[p]),
+    pending: (gcfg.projects[p].pending ?? []).map((s) => s.command),
     goal: gcfg.projects[p].goal ?? null,
+    repo: gcfg.projects[p].repo ?? null,
+    base: gcfg.projects[p].base,
     branch: gcfg.projects[p].parent ? `${gcfg.projects[p].base} of ${gcfg.projects[p].parent}` : null,
+    upstreams: Object.entries(gcfg.projects[p].upstreams ?? {}).map(([n, u]) => ({ name: n, repo: u.repo, sha: u.sha ?? null })),
+    /** This stream's Claude spend today and this week, and its own daily cap (0 = only the global cap). */
+    budget: { todayUsd: Math.round(store.spendToday(p) * 100) / 100, weekUsd: Math.round((weekAll.byProject[p] ?? 0) * 100) / 100, dailyUsd: gcfg.projects[p].dailyUsd ?? 0 },
     counts: store.counts(p),
+    open: store.openCount(p),
     running: store.list({ project: p, status: ["running"] }).map(taskRow),
     next: store.list({ project: p, status: ["queued"], limit: 8 }).map(taskRow),
     needsYou: store
@@ -257,7 +267,8 @@ export async function collectStatus(store: Store, gcfg: GlobalConfig, o: WebOpts
     budgets: { todayUsd: Math.round(today * 100) / 100, weekUsd: Math.round(week.total * 100) / 100, weekCalls: week.calls, dailyCapUsd: gcfg.budgets.dailyUsd, taskCapUsd: gcfg.budgets.taskUsd, byAgent: week.byAgent, byProject: week.byProject },
     lanes: Object.entries(gcfg.worker.lanes).map(([lane, slots]) => ({ lane, slots, running: store.list({ status: ["running"] }).filter((t) => t.lane === lane).map((t) => t.id) })),
     agents: agentCatalog(store, registry, gcfg),
-    proposals: store.proposals("open").map(viewProposal),
+    proposals: store.proposals(["open", "approved"]).map((r) => viewProposal(r, store)),
+    proposalsRepo: gcfg.proposals.github ? gcfg.proposals.repo || null : "off",
     checks,
     totals,
     queue,
@@ -476,11 +487,58 @@ export function createHandler(store: Store, gcfg: GlobalConfig, o: WebOpts, tls:
           log(`web: ${by} cancelled #${id}`);
           return Response.json({ ok: true, task: taskRow(c.task), note: c.note ?? `#${id} cancelled` }, { headers });
         }
-        const pm = url.pathname.match(/^\/api\/proposal\/(\d+)\/(dismiss|reopen)$/);
+        const pm = url.pathname.match(/^\/api\/proposal\/(\d+)\/(dismiss|reopen|approve|comment)$/);
         if (pm) {
+          const b = await jsonBody(req);
+          const id = Number(pm[1]);
+          const reason = typeof b.reason === "string" ? b.reason : null;
+          const r =
+            pm[2] === "approve"
+              ? await approveProposal(store, fresh, id, by, { note: reason })
+              : pm[2] === "dismiss"
+                ? await dismissProposal(store, fresh, id, by, reason)
+                : pm[2] === "reopen"
+                  ? await reopenProposal(store, fresh, id, by)
+                  : await commentOnProposal(store, fresh, id, by, typeof b.text === "string" ? b.text : "");
+          log(`web: ${by} ${pm[2]} proposal #${id}: ${r.lines.join(" | ")}`);
+          return Response.json({ ok: true, proposal: viewProposal(r.proposal, store), task: r.task ? taskRow(r.task) : null, note: r.lines[0], lines: r.lines }, { headers });
+        }
+        if (url.pathname === "/api/proposals/sync") {
           await jsonBody(req);
-          const row = store.setProposalStatus(Number(pm[1]), pm[2] === "dismiss" ? "dismissed" : "open");
-          return Response.json({ ok: true, proposal: viewProposal(row) }, { headers });
+          const lines = await syncProposals(store, fresh);
+          log(`web: ${by} synced proposals: ${lines.join(" | ") || "nothing to do"}`);
+          return Response.json({ ok: true, lines, proposals: store.proposals(["open", "approved"]).map((r) => viewProposal(r, store)) }, { headers });
+        }
+        if (url.pathname === "/api/budgets") {
+          const b = await jsonBody(req);
+          const num = (v: unknown) => (v == null || v === "" ? null : Number(v));
+          const budgets = setGlobalBudgets({ dailyUsd: num(b.dailyUsd), taskUsd: num(b.taskUsd) });
+          log(`web: ${by} set global budgets: daily $${budgets.dailyUsd}, task $${budgets.taskUsd}`);
+          return Response.json({ ok: true, budgets, note: `caps saved: $${budgets.dailyUsd || "none"} per day, $${budgets.taskUsd || "none"} per task` }, { headers });
+        }
+        const prm = url.pathname.match(/^\/api\/project\/([a-z0-9][a-z0-9-]*)\/(cancel-open|budget|pause|resume|use)$/);
+        if (prm) {
+          const [, name, action] = prm;
+          const b = await jsonBody(req);
+          if (!fresh.projects[name]) return Response.json({ ok: false, error: `unknown project "${name}"` }, { status: 404, headers });
+          if (action === "cancel-open") {
+            const r = cancelProjectTasks(store, name, by, typeof b.reason === "string" ? b.reason : null);
+            log(`web: ${by} cancelled all open tasks of ${name}: ${r.note}`);
+            return Response.json({ ok: true, cancelled: r.cancelled.map((t) => t.id), running: r.running.map((t) => t.id), note: r.note }, { headers });
+          }
+          if (action === "budget") {
+            const usd = setProjectBudget(name, b.dailyUsd == null || b.dailyUsd === "" ? 0 : Number(b.dailyUsd));
+            log(`web: ${by} set ${name} daily cap to $${usd}`);
+            return Response.json({ ok: true, dailyUsd: usd, note: usd ? `${name}: daily cap $${usd}` : `${name}: no cap of its own (the global cap applies)` }, { headers });
+          }
+          if (action === "use") {
+            makeCurrentProject(name);
+            log(`web: ${by} made ${name} the current project`);
+            return Response.json({ ok: true, note: `${name} is the current project` }, { headers });
+          }
+          const r = setProjectStatus(name, action === "pause" ? "paused" : "active");
+          log(`web: ${by} ${action}d ${name}`);
+          return Response.json({ ok: true, status: r.status, note: `${name} ${action}d${action === "pause" ? "; its open tasks wait, a running one finishes first" : ""}` }, { headers });
         }
         return Response.json({ ok: false, error: "no such action" }, { status: 404, headers });
       }
@@ -507,7 +565,13 @@ export function createHandler(store: Store, gcfg: GlobalConfig, o: WebOpts, tls:
       if (url.pathname === "/api/agents") return Response.json({ agents: agentCatalog(store, loadRegistry(), gcfg), problems: loadRegistry().problems }, { headers });
       if (url.pathname === "/api/proposals") {
         const all = url.searchParams.get("all") === "1";
-        return Response.json({ proposals: store.proposals(all ? undefined : "open").map(viewProposal) }, { headers });
+        return Response.json({ proposals: store.proposals(all ? undefined : ["open", "approved"]).map((r) => viewProposal(r, store)) }, { headers });
+      }
+      const prm = url.pathname.match(/^\/api\/proposal\/(\d+)$/);
+      if (prm) {
+        const row = store.proposal(Number(prm[1]));
+        if (!row) return Response.json({ error: "no such proposal" }, { status: 404, headers });
+        return Response.json({ proposal: viewProposal(row, store) }, { headers });
       }
       if (url.pathname === "/api/spend") {
         const days = Math.min(90, Number(url.searchParams.get("days") ?? 7) || 7);
@@ -561,5 +625,24 @@ export async function runWeb(store: Store, gcfg: GlobalConfig, o: WebOpts) {
   };
   process.on("SIGTERM", stop);
   process.on("SIGINT", stop);
+  // Proposal issues are swept from here too, so an "approved" typed on GitHub queues agent-creator
+  // without waiting for the architect's wake-up. Config is re-read each time; failures are logged.
+  const sweep = async () => {
+    let g = gcfg;
+    try {
+      g = gcfg = loadGlobalConfig();
+    } catch {
+      /* keep the last good config */
+    }
+    if (!g.proposals.github || g.proposals.pollSec <= 0) return;
+    try {
+      const lines = await syncProposals(store, g);
+      if (lines.length) log(`web: proposal sweep: ${lines.join(" | ")}`);
+    } catch (e) {
+      log(`web: proposal sweep failed: ${(e as Error).message}`);
+    }
+  };
+  setTimeout(sweep, 30_000);
+  setInterval(sweep, Math.max(60, gcfg.proposals.pollSec || 600) * 1000);
   await new Promise(() => {});
 }

@@ -238,10 +238,17 @@ What each status means, and what the worker does with it:
 
 `agent_proposals` is how a delegating agent says "this needs an agent that does not exist".
 Proposals are recorded (deduplicated by name while open), listed in the task's summary and
-events, in the digest, on the status page and in `agentpipe agents proposals`. Nothing is
-created automatically; `agentpipe agents new NAME --from ID` scaffolds the package from the
-proposal. The architect's verifier refuses proposals for names that already exist and subtasks
-that name a proposed agent.
+events, in the digest, on the status page and in `agentpipe agents proposals`, and published as
+GitHub issues in the agentpipe repository (`src/proposal-sync.ts`, `src/issues.ts`,
+`src/proposals.ts`). The owner discusses a proposal in its issue thread or on the page; the
+architect answers the unanswered comments on its wake-up (one model call, `answerProposalFeedback`)
+and revises the specification or withdraws the proposal when the feedback calls for it. The
+owner's `approved` (or `please implement`) comment, the Approve button or `agentpipe agents
+approve ID` queues one `agent-creator` task carrying the specification and the whole discussion;
+`dismissed`, closing the issue, or Dismiss drops it. When the agent appears in a registry the
+proposal is marked created and its issue closed. Nothing is created automatically. The
+architect's verifier refuses proposals for names that already exist and subtasks that name a
+proposed agent. (`agentpipe agents new NAME --from ID` still scaffolds a package by hand.)
 
 Two more outcomes are decided by the worker, not the agent:
 
@@ -319,6 +326,8 @@ What the built-ins verify:
 | Agent | Verifier checks |
 |---|---|
 | architect | no file changes; `done` implies at least one subtask or project; branch streams name a parent and clones a repo; every subtask description is long enough to act on and does not say "see above"; coder subtasks mention tests |
+| agent-creator | a confirmation whose writes land under one directory of the machine agents directory; the resulting package (written files plus, for a revision, what is already installed) has a parsing manifest named after the directory, a prompt where the runtime needs one, a verifier and a test; a revision quotes the previous content; the last step runs the tests |
+| media-transcriber | only Markdown and CSV under docs (or `*.md`/`*.csv`) changed, never `upstream/`; `done` implies files; every transcription names its source in its header; the report lists the gaps marked or says there were none |
 | coder | `done` implies changed files and commits on the branch; no screenshot baseline touched |
 | unit-tester | only test files changed; `done` implies at least one |
 | docs-writer | only documentation files changed; `done` implies at least one |
@@ -406,7 +415,10 @@ how a tree of work converges without any agent holding the whole plan in its hea
 
 A human can reopen a child that stopped (`agentpipe reply`, `retry`, or the status page). The
 child is requeued; if its parent was already in `review` or `attention`, the parent goes back to
-`waiting`, so the child's new outcome is reviewed rather than orphaned.
+`waiting`, so the child's new outcome is reviewed rather than orphaned. A human can also cancel a
+whole tree, or every open task of a project (`agentpipe cancel --all`, the project tab); a task
+cancelled while it runs finishes its current agent call, and the worker then records its result
+without changing its status or creating anything from it.
 
 Delegation is therefore one level at a time: an agent plans the next layer, finishes, and the
 review cycle decides whether another layer is needed. An agent never waits on its own children.
@@ -479,7 +491,9 @@ once, in the same run, so it can rewrite the request; only a second refusal ends
 
 The built-in `github` and `agent-creator` agents are the two examples; their verifiers add the
 role-specific rules (git/gh commands only and named destruction for github; one package under the
-machine agents directory with a parsing manifest and a final test run for agent-creator). The
+machine agents directory with a parsing manifest and a final test run for agent-creator, which
+also revises an installed package when given a defect and its evidence, rewriting only the files
+that change and quoting what they replace). The
 `agentpipe` context kind gives an agent the paths of the pipeline itself: root, authoring guide,
 built-in packages, verifier and test helpers, and the machine agents directory.
 
@@ -776,9 +790,11 @@ finding. Then: `agentpipe agents test dependency-auditor`, once with `--e2e`, th
 - Assets are implied by status plus branch, PR URL and run directory; there is no separate
   "attachments" field. If an agent produces something else (an image, a data file), it should
   commit it (`commits: true`) or name its path in the summary.
-- Nothing turns GitHub issues into tasks yet; agents with `gh-read` can read them.
-- Claude agents read PDFs and images with the Read tool; spreadsheets and archives are not
-  readable by any agent. An agent that needs one asks for a CSV or text export in `attention`.
+- GitHub issues carry only the agent-proposal discussion (code reads and writes those; see
+  section 3.4); nothing turns other issues into tasks yet. Agents with `gh-read` can read them.
+- Claude agents read PDFs and images with the Read tool (`media-transcriber` turns them into
+  text other agents can work from); spreadsheets and archives are not readable by any agent. An
+  agent that needs one asks for a CSV or text export in `attention`.
 - The shell policy is a pattern matcher, not a sandbox: it refuses what it recognises and
   refuses what no group covers, but a command that passes still runs with the worker's own
   permissions inside the worktree.

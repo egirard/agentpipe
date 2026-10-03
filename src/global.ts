@@ -134,6 +134,16 @@ export interface GlobalConfig {
     /** Seconds between checks of an open pull request. */
     pollSec: number;
   };
+  proposals: {
+    /** Publish every agent proposal as a GitHub issue and read the owner's comments back. Off = proposals live only in the database and on the page. */
+    github: boolean;
+    /** owner/name of the repository that holds the issues. Empty = the origin of the agentpipe checkout. */
+    repo: string;
+    /** GitHub logins whose comments decide a proposal, besides the repository's owner, members and collaborators. */
+    approvers: string[];
+    /** Seconds between the status page's sweeps of the issues (approvals typed on GitHub queue agent-creator without waiting for the architect). 0 = only the architect's wake-up sweeps. */
+    pollSec: number;
+  };
 }
 
 export const GLOBAL_DEFAULTS: GlobalConfig = {
@@ -145,6 +155,7 @@ export const GLOBAL_DEFAULTS: GlobalConfig = {
   budgets: { taskUsd: 5, dailyUsd: 40, agentAttentionRate: 0.5, agentWindow: 10 },
   notifications: { webhook: "", command: "", events: ["attention", "failed", "cancelled", "digest", "budget", "agent-health", "worker"] },
   prReview: { enabled: true, agent: "pr-gate", pollSec: 300 },
+  proposals: { github: true, repo: "", approvers: [], pollSec: 600 },
 };
 
 export function configDir(): string {

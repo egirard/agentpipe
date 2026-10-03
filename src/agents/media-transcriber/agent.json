@@ -1,0 +1,30 @@
+{
+  "name": "media-transcriber",
+  "description": "Transcribes source material no other agent can work from: PDF rulebooks, scanned pages, board and card photographs, diagrams, kept under upstream/<name>/ or in the repository. Produces faithful Markdown or CSV transcriptions in the project's docs, marking every passage it could not read with confidence instead of guessing.",
+  "runtime": "claude",
+  "when_to_use": "When a project's authority on some question is a PDF or an image (a rulebook, a reference sheet, a component scan) and tasks downstream need its content as text: before writing rules summaries, data tables or implementation plans from it. Not for text that already exists as Markdown or CSV (docs-writer adapts that), not for spreadsheets or archives (no agent can read them; ask for a CSV export), and not for interpreting rules: it writes down what the source says, with page and location references, and leaves judgement to the task that reads the transcription.",
+  "inputs": "The exact source files to transcribe (paths under upstream/<name>/ or in the repository), the output path and format wanted (Markdown under docs/, or CSV for tabular material), what the transcription must cover (whole document, named sections, the questions it must answer), and any naming conventions for headings or columns.",
+  "outputs": "A branch with the transcriptions committed under docs/ (Markdown or CSV), each with a header naming the source file, its commit when it is an upstream, and the pages or regions covered; a pull request when the project pushes; a report listing every source file, what was transcribed, and every passage, table cell, diagram or photograph marked [unreadable] or [uncertain] with the reason.",
+  "can_delegate": false,
+  "commits": true,
+  "model": "",
+  "context": [
+    "repo-overview",
+    "files"
+  ],
+  "max_turns": 60,
+  "timeout_sec": 3600,
+  "tags": [
+    "docs",
+    "transcription",
+    "upstream"
+  ],
+  "shell": [
+    "git-read"
+  ],
+  "paths": [
+    "docs/**",
+    "**/*.md",
+    "**/*.csv"
+  ]
+}

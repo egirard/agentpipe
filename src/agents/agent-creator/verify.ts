@@ -1,3 +1,4 @@
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { configDir, expandHome } from "../../global.ts";
 import { AgentManifest } from "../../registry.ts";
@@ -6,7 +7,9 @@ import { defineVerifier, noChanges, nonEmptySummary } from "../../verify.ts";
 /**
  * The agent-creator promises an installable package: every file under the machine agents
  * directory for one agent, a manifest that parses and matches the directory, a prompt where the
- * runtime needs one, a verifier and a test, and the test run as the last step.
+ * runtime needs one, a verifier and a test, and the test run as the last step. For a revision of
+ * an installed package the files it does not rewrite are the ones already on disk, so the check
+ * is on the resulting package, not on the steps alone.
  */
 export default defineVerifier(async (ctx) => {
   const { result } = ctx;
@@ -32,21 +35,27 @@ export default defineVerifier(async (ctx) => {
   }
   if (dirs.size !== 1) problems.push(`the package must write exactly one agent directory (found ${[...dirs].join(", ") || "none"})`);
   const name = [...dirs][0] ?? "";
-  const manifestText = files.get("agent.json");
+  // A revision rewrites only what changes; the rest of the package is already installed.
+  const pkg = path.join(root, name);
+  const installed = name && existsSync(path.join(pkg, "agent.json"));
+  const have = (rel: string): string | null => files.get(rel) ?? (installed && existsSync(path.join(pkg, rel)) ? readFileSync(path.join(pkg, rel), "utf8") : null);
+  const hasTest = [...files.keys()].some((f) => f.startsWith("tests/") && f.endsWith(".test.ts")) || (installed && existsSync(path.join(pkg, "tests")));
+  const manifestText = have("agent.json");
   if (!manifestText) problems.push("agent.json is missing");
   else {
     try {
       const m = AgentManifest.parse(JSON.parse(manifestText));
       if (m.name !== name) problems.push(`agent.json names "${m.name}" but the directory is "${name}"`);
-      if ((m.runtime === "claude" || m.runtime === "ollama") && !m.prompt && !files.get("prompt.md")?.trim()) problems.push(`${m.runtime} agents need prompt.md`);
+      if ((m.runtime === "claude" || m.runtime === "ollama") && !m.prompt && !have("prompt.md")?.trim()) problems.push(`${m.runtime} agents need prompt.md`);
       if (m.shell.includes("ops")) problems.push("the ops shell group is reserved for shell-runner");
       if (m.runtime === "shell" && !m.command) problems.push("shell agents need a command");
     } catch (e) {
       problems.push(`agent.json does not parse as a manifest: ${(e as Error).message.split("\n")[0]}`);
     }
   }
-  if (!files.has("verify.ts")) problems.push("verify.ts is missing");
-  if (![...files.keys()].some((f) => f.startsWith("tests/") && f.endsWith(".test.ts"))) problems.push("tests/<name>.test.ts is missing");
+  if (!have("verify.ts")) problems.push("verify.ts is missing");
+  if (!hasTest) problems.push("tests/<name>.test.ts is missing");
+  if (installed && !/before|previous|was:|restore/i.test(c.risk + result.summary)) problems.push("a revision of an installed agent must quote the previous content (in the summary) so the human can restore it");
   const last = c.steps[c.steps.length - 1];
   if (last.kind !== "command" || !/^bun test\b/.test(last.command ?? "")) problems.push("the last step must run the package's tests (bun test <dir>/tests)");
   if (result.subtasks.length) problems.push("a confirmation request cannot come with subtasks");

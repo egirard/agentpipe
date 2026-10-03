@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { addTask, approveTask, cancelTask, recordProposals, rejectTask, replyToTask, retryTask, validateConfirmation } from "./actions.ts";
+import { addTask, approveTask, cancelProjectTasks, cancelTask, makeCurrentProject, recordProposals, rejectTask, replyToTask, retryTask, setGlobalBudgets, setProjectBudget, setProjectStatus, validateConfirmation } from "./actions.ts";
 import { loadGlobalConfig, saveGlobalConfig } from "./global.ts";
 import { renderContinuation, taskEnv } from "./runner.ts";
 import { Store } from "./store.ts";
@@ -165,7 +165,7 @@ describe("recordProposals", () => {
     const p = { name: "db-migrator", description: "Writes and checks SQL migrations for the schema.", runtime: "claude" as const, why: "The goal needs a schema change and nobody may touch SQL.", inputs: "", outputs: "", commits: true, shell: [] };
     const lines = recordProposals(store, [p], { task: t, project: "demo", by: `agent:architect#${t.id}` });
     expect(lines[0]).toContain("db-migrator");
-    expect(lines[0]).toContain("agentpipe agents new db-migrator --from 1");
+    expect(lines[0]).toContain("GitHub issue");
     recordProposals(store, [p], { task: null, project: "demo", by: "architect-review" });
     const open = store.proposals("open");
     expect(open.length).toBe(1);
@@ -293,5 +293,60 @@ describe("editTask", () => {
     store.setStatus(t.id, "running");
     expect(() => editTask(store, g, t.id, { title: "x" }, "cli")).toThrow(/running/);
     expect(() => editTask(store, g, 999, { title: "x" }, "cli")).toThrow(/#999/);
+  });
+});
+
+describe("project controls", () => {
+  test("cancelProjectTasks sweeps every open task of one project, children first, and leaves other projects alone", () => {
+    const g = loadGlobalConfig();
+    g.projects.other = { path: path.join(root, "repo"), base: "main", push: false };
+    saveGlobalConfig(g);
+    const parent = store.add({ project: "demo", agent: "architect", title: "goal", description: "goal" });
+    store.setStatus(parent.id, "running");
+    store.setStatus(parent.id, "waiting");
+    const a = store.add({ project: "demo", agent: "coder", title: "a", description: "a", parent_id: parent.id });
+    const b = store.add({ project: "demo", agent: "coder", title: "b", description: "b", parent_id: parent.id, depends_on: [a.id] });
+    store.setStatus(a.id, "running");
+    store.setStatus(a.id, "attention", "asked");
+    expect(store.get(b.id)!.status).toBe("blocked");
+    const running = store.add({ project: "demo", agent: "coder", title: "r", description: "r" });
+    store.setStatus(running.id, "running");
+    const done = store.add({ project: "demo", agent: "coder", title: "d", description: "d" });
+    store.setStatus(done.id, "running");
+    store.setStatus(done.id, "done");
+    const elsewhere = store.add({ project: "other", agent: "coder", title: "o", description: "o" });
+
+    const r = cancelProjectTasks(store, "demo", "eugene", "restarting the stream");
+    expect(r.cancelled.map((t) => t.id).sort()).toEqual([parent.id, a.id, b.id, running.id].sort());
+    expect(r.running.map((t) => t.id)).toEqual([running.id]);
+    expect(r.note).toContain("4 task(s) of demo cancelled");
+    expect(r.note).toContain(`#${running.id}`);
+    for (const id of [parent.id, a.id, b.id, running.id]) {
+      expect(store.get(id)!.status).toBe("cancelled");
+      expect(store.get(id)!.error).toBe("restarting the stream");
+      expect(store.get(id)!.triaged).toBe(1);
+    }
+    expect(store.get(done.id)!.status).toBe("done");
+    expect(store.get(elsewhere.id)!.status).toBe("queued");
+    expect(store.openCount("demo")).toBe(0);
+    expect(cancelProjectTasks(store, "demo", "eugene").note).toContain("no open tasks");
+  });
+  test("budgets and status are written to the config", () => {
+    expect(setProjectBudget("demo", 12.345)).toBe(12.35);
+    expect(loadGlobalConfig().projects.demo.dailyUsd).toBe(12.35);
+    expect(setProjectBudget("demo", 0)).toBe(0);
+    expect(loadGlobalConfig().projects.demo.dailyUsd).toBeUndefined();
+    expect(() => setProjectBudget("demo", -1)).toThrow(/dollars/);
+    expect(() => setProjectBudget("nope", 1)).toThrow(/unknown project/);
+    const caps = setGlobalBudgets({ dailyUsd: 25, taskUsd: null });
+    expect(caps.dailyUsd).toBe(25);
+    expect(caps.taskUsd).toBe(5);
+    expect(setProjectStatus("demo", "paused").status).toBe("paused");
+    expect(loadGlobalConfig().projects.demo.status).toBe("paused");
+    expect(setProjectStatus("demo", "active").status).toBe("active");
+    expect(loadGlobalConfig().projects.demo.status).toBeUndefined();
+    expect(() => makeCurrentProject("old")).toThrow(/archived/);
+    makeCurrentProject("demo");
+    expect(loadGlobalConfig().defaultProject).toBe("demo");
   });
 });

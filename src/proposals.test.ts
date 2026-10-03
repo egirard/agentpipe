@@ -145,3 +145,17 @@ describe("feedbackDigest", () => {
     expect(d).toContain("omitted");
   });
 });
+
+describe("decision words", () => {
+  const c = (body: string): IssueComment => ({ author: "egirard", association: "OWNER", createdAt: "2026-10-03T10:00:00Z", body });
+  test("please implement, go ahead and lgtm approve; not needed and withdraw dismiss; prose does neither", () => {
+    expect(decisionFromComment(c("Please implement, but keep it read-only."))).toBe("approved");
+    expect(decisionFromComment(c("**Go ahead**"))).toBe("approved");
+    expect(decisionFromComment(c("LGTM"))).toBe("approved");
+    expect(decisionFromComment(c("Not needed: shell-runner covers it."))).toBe("dismissed");
+    expect(decisionFromComment(c("withdraw"))).toBe("dismissed");
+    expect(decisionFromComment(c("I would approve this if it were narrower."))).toBeNull();
+    expect(decisionFromComment({ ...c("approved"), association: "NONE", author: "stranger" })).toBeNull();
+    expect(decisionFromComment({ ...c("approved"), association: "NONE", author: "Trusted" }, ["trusted"])).toBe("approved");
+  });
+});

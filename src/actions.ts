@@ -1,11 +1,11 @@
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
-import { currentProject, expandHome, isRunnable, projectStatus, type GlobalConfig, type ProjectConfig } from "./global.ts";
+import { currentProject, expandHome, isRunnable, projectStatus, updateGlobalConfig, type GlobalConfig, type ProjectConfig, type ProjectStatus } from "./global.ts";
 import { loadRegistry, requireAgent } from "./registry.ts";
 import type { AgentProposal, ConfirmationRequest } from "./result.ts";
 import { checkApprovedCommand } from "./shell-policy.ts";
-import type { Confirmation, ProposalRow, Store, Task } from "./store.ts";
+import type { Confirmation, ProposalComment, ProposalRow, Store, Task } from "./store.ts";
 import { clip, log, sh } from "./util.ts";
 
 /**
@@ -186,20 +186,91 @@ export function cancelTask(store: Store, id: number, by: string, reason?: string
   return { task: store.get(id)!, note: t.status === "running" ? "the worker is running this task; it finishes the current agent call, then the result is recorded but no subtasks are created. Stop the worker to abort it." : null };
 }
 
+/** Statuses that "cancel all open tasks" sweeps up: everything that is not already over. */
+export const CANCELLABLE: Task["status"][] = ["queued", "blocked", "running", "waiting", "review", "attention", "failed"];
+
+export interface CancelProjectOutcome {
+  cancelled: Task[];
+  running: Task[];
+  note: string;
+}
+
+/**
+ * Cancel every open task of one project at once: a stream whose plan went wrong and is being
+ * restarted. Children go first so no parent is woken for review half-way through; running tasks
+ * are marked and the worker records their result without acting on it when they finish.
+ */
+export function cancelProjectTasks(store: Store, project: string, by: string, reason?: string | null): CancelProjectOutcome {
+  const open = store.list({ project, status: CANCELLABLE }).sort((a, b) => b.id - a.id);
+  const why = (reason ?? "").trim() || `all open tasks of ${project} cancelled`;
+  const cancelled: Task[] = [];
+  const running: Task[] = [];
+  for (const t of open) {
+    if (t.status === "running") running.push(t);
+    cancelled.push(cancelTask(store, t.id, by, why).task);
+  }
+  const note = cancelled.length
+    ? `${cancelled.length} task(s) of ${project} cancelled${running.length ? `; ${running.length} running (${running.map((t) => "#" + t.id).join(", ")}) finish their current agent call first, then stop` : ""}`
+    : `${project} has no open tasks`;
+  return { cancelled, running, note };
+}
+
+/** Set or clear (0) a project's own daily Claude cap. Returns the saved value. */
+export function setProjectBudget(name: string, dailyUsd: number): number {
+  if (!Number.isFinite(dailyUsd) || dailyUsd < 0) throw new Error("the daily cap is a number of dollars (0 = only the global cap applies)");
+  const usd = Math.round(dailyUsd * 100) / 100;
+  updateGlobalConfig((c) => {
+    if (!c.projects[name]) throw new Error(`unknown project "${name}"`);
+    if (usd) c.projects[name].dailyUsd = usd;
+    else delete c.projects[name].dailyUsd;
+  });
+  return usd;
+}
+
+/** Set the machine-wide Claude caps (per task, per UTC day); null leaves one alone, 0 removes it. */
+export function setGlobalBudgets(patch: { dailyUsd?: number | null; taskUsd?: number | null }): GlobalConfig["budgets"] {
+  for (const v of [patch.dailyUsd, patch.taskUsd]) if (v != null && (!Number.isFinite(v) || v < 0)) throw new Error("a cap is a number of dollars (0 = none)");
+  return updateGlobalConfig((c) => {
+    if (patch.dailyUsd != null) c.budgets.dailyUsd = Math.round(patch.dailyUsd * 100) / 100;
+    if (patch.taskUsd != null) c.budgets.taskUsd = Math.round(patch.taskUsd * 100) / 100;
+    return c.budgets;
+  });
+}
+
+/** Pause, resume or archive a stream. Archiving the current project hands "current" to another active one. */
+export function setProjectStatus(name: string, status: ProjectStatus): { status: ProjectStatus; current: string | null } {
+  return updateGlobalConfig((c) => {
+    if (!c.projects[name]) throw new Error(`unknown project "${name}"`);
+    if (status === "active") delete c.projects[name].status;
+    else c.projects[name].status = status;
+    if (status === "archived" && c.defaultProject === name) c.defaultProject = Object.keys(c.projects).find((n) => n !== name && projectStatus(c.projects[n]) === "active") ?? null;
+    return { status, current: c.defaultProject };
+  });
+}
+
+/** Make a project the current one (commands default to it, the worker claims its tasks first). */
+export function makeCurrentProject(name: string): void {
+  updateGlobalConfig((c) => {
+    if (!c.projects[name]) throw new Error(`unknown project "${name}"`);
+    if (projectStatus(c.projects[name]) === "archived") throw new Error(`${name} is archived; resume it first`);
+    c.defaultProject = name;
+  });
+}
+
 /** File an agent's proposals for agents that do not exist. Returns one line per proposal for logs and digests. */
 export function recordProposals(store: Store, proposals: AgentProposal[] | undefined, from: { task: Task | null; project: string | null; by: string }): string[] {
   const out: string[] = [];
   for (const p of proposals ?? []) {
     const row = store.proposeAgent({ name: p.name, spec: p, task_id: from.task?.id ?? null, project: from.project, proposed_by: from.by });
     if (from.task) store.event(from.task.id, "proposal", `agent "${p.name}" (${p.runtime}) proposed: ${p.why.replace(/\s+/g, " ").slice(0, 300)}`);
-    out.push(`- proposed agent "${p.name}" (${p.runtime}${row.times > 1 ? `, asked for ${row.times} times` : ""}): ${p.why.replace(/\s+/g, " ")}. Create it: agentpipe agents new ${p.name} --from ${row.id}`);
+    out.push(`- proposed agent "${p.name}" (${p.runtime}${row.times > 1 ? `, asked for ${row.times} times` : ""}): ${p.why.replace(/\s+/g, " ")}. It is published as a GitHub issue for your decision (approve there or on the status page).`);
   }
   return out;
 }
 
-/** A proposal row with its spec parsed, for the API and the CLI. */
-export function viewProposal(r: ProposalRow): ProposalRow & { proposal: AgentProposal } {
-  return { ...r, proposal: JSON.parse(r.spec) as AgentProposal };
+/** A proposal row with its spec parsed and its discussion, for the API and the CLI. */
+export function viewProposal(r: ProposalRow, store?: Store): ProposalRow & { proposal: AgentProposal; comments: ProposalComment[] } {
+  return { ...r, proposal: JSON.parse(r.spec) as AgentProposal, comments: store ? store.proposalComments(r.id) : [] };
 }
 
 /* ---------- confirmations: agents that may act only with the human's approval ---------- */

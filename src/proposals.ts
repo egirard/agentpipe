@@ -50,9 +50,10 @@ export function issueBody(input: { id: number; proposal: AgentProposal; proposed
     "",
     "## How to decide",
     "",
-    "- Comment `approved` on its own first line and the pipeline queues the agent-creator agent to build it.",
-    "- Comment anything else to send feedback, which the architect answers in this thread.",
-    "- Or press Approve on the status page.",
+    "- Comment `approved` or `please implement` on its own first line and the pipeline queues the agent-creator agent to build it.",
+    "- Comment `dismissed` (or close the issue) to drop it.",
+    "- Comment anything else to send feedback; the architect answers in this thread on its next wake-up and revises the specification when the feedback calls for it.",
+    "- Or decide on the status page under Suggested agents.",
     "",
     proposalMarker(input.id),
     BOT_MARKER,
@@ -113,9 +114,14 @@ export function decisionFromComment(c: IssueComment, approvers: string[] = []): 
     .trim()
     .replace(/[\s.,:;!?)\]-]+$/, "")
     .toLowerCase();
-  if (/^approved?\b/.test(line)) return "approved";
-  if (/^(dismiss(ed)?|decline[d]?|reject(ed)?)\b/.test(line)) return "dismissed";
+  if (/^(approved?|please implement|implement( it| this)?|build it|go ahead|lgtm)\b/.test(line)) return "approved";
+  if (/^(dismiss(ed)?|decline[d]?|reject(ed)?|not needed|drop( it)?|withdraw)\b/.test(line)) return "dismissed";
   return null;
+}
+
+/** Posted when the architect answers the owner's feedback without changing the specification. */
+export function replyComment(text: string): string {
+  return [text.trim(), "", BOT_MARKER].join("\n");
 }
 
 /** The human comments the pipeline has not read yet, oldest first. */

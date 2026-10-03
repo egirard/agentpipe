@@ -5,7 +5,7 @@ import path from "node:path";
 import { loadGlobalConfig, saveGlobalConfig } from "./global.ts";
 import type { Registry } from "./registry.ts";
 import { Store, type Task } from "./store.ts";
-import { queuePrReview } from "./worker.ts";
+import { finish, queuePrReview } from "./worker.ts";
 
 /**
  * Queuing the pull request gate: every task that opens a pull request gets exactly one review
@@ -136,5 +136,29 @@ describe("createSubtasks across projects", () => {
     expect(warnings.some((w) => w.includes('"nope"') && w.includes("not registered"))).toBe(true);
     expect(warnings.some((w) => w.includes('"gone"') && w.includes("archived"))).toBe(true);
     expect(warnings.some((w) => w.includes('"unicorn"') && w.includes("(in other)"))).toBe(true);
+  });
+});
+
+describe("finish after a cancellation", () => {
+  test("a task cancelled while it ran keeps its result for the record but stays cancelled with no subtasks", () => {
+    const g = loadGlobalConfig();
+    const t = store.add({ project: "demo", agent: "architect", title: "plan", description: "plan" });
+    store.setStatus(t.id, "running");
+    store.setStatus(t.id, "cancelled", "by eugene: restarting");
+    const outcome = {
+      result: { status: "done" as const, summary: "Planned three tasks.", findings: [], subtasks: [{ title: "x", description: "do x with tests", agent: "coder", acceptance: ["x passes"] }] },
+      verification: { ran: false, ok: true, problems: [] },
+      runDir: "/tmp/run",
+      branch: null,
+      baseBranch: "main",
+      prUrl: null,
+    } as any;
+    finish(store, g, store.get(t.id)!, outcome, null, WITHOUT_GATE);
+    const after = store.get(t.id)!;
+    expect(after.status).toBe("cancelled");
+    expect(after.summary).toBe("Planned three tasks.");
+    expect(after.run_dir).toBe("/tmp/run");
+    expect(store.children(t.id)).toEqual([]);
+    expect(store.events(t.id).some((e) => /finished after being cancelled/.test(e.message))).toBe(true);
   });
 });

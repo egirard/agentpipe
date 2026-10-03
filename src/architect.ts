@@ -10,6 +10,7 @@ import { describeStream } from "./projects.ts";
 import { delegateTargets, loadRegistry } from "./registry.ts";
 import { catalogFor } from "./runner.ts";
 import { notify } from "./notify.ts";
+import { answerProposalFeedback, syncProposals } from "./proposal-sync.ts";
 import { hookSettings, toolsForGroups } from "./shell-policy.ts";
 import type { Reply, Store, Task } from "./store.ts";
 import { clip, log, nowStamp, setLogFile } from "./util.ts";
@@ -52,7 +53,7 @@ Decision guide:
 - attention: a human must decide or answer (design question, environment problem, repeated failures, screenshot baseline changes, an agent that has to be created first). State exactly what you need from them; their reply is shown to the task's agent when it runs again.
 - cancel: the task is moot, or proved impossible as specified and no retry or re-specification would help. Say why. An item an agent already reported as cancelled needs confirming (cancel), a different approach (continue), or a human (attention).
 Respect the round limit stated for each item; when it is reached, choose attention or done, not continue.
-When work under review failed because no registered agent has the needed skill (a tool, a language, an external system, a kind of check), put the missing agent in agent_proposals: name, runtime, what it would do, and why. Never name an agent that does not exist in a subtask. Human replies attached to an item are the owner's instructions: follow them.
+When work under review failed because no registered agent has the needed skill (a tool, a language, an external system, a kind of check), put the missing agent in agent_proposals: name, runtime, what it would do, and why. Each proposal becomes a GitHub issue the owner decides on (approve queues agent-creator); you answer their comments on your next wake-up. Never name an agent that does not exist in a subtask. Human replies attached to an item are the owner's instructions: follow them.
 Every subtask you create needs acceptance criteria: checkable statements the agent works to and its verifier and your next review judge by.
 Agents whose track record shows many escalations or failures should get smaller, more precise tasks or be avoided.
 A task created a stream and the stream's own queue carries the work? Then the creating task is done once the stream is approved; do not keep it open to plan the stream's work from here. Children may live in another project when a subtask named one. A task whose description is wrong (stale, names a refused command) is edited, not re-planned around: say so in attention with the exact text to replace, the human runs agentpipe edit.
@@ -68,6 +69,15 @@ export async function architectReview(store: Store, gcfg: GlobalConfig, opts: Re
   // Archived streams are finished business; paused ones are still reviewed (their tasks stopped, not their history).
   const projects = opts.project ? [opts.project] : Object.keys(gcfg.projects).filter((n) => projectStatus(gcfg.projects[n]) !== "archived");
   const digests: string[] = [];
+  // Agent proposals first: publish new ones, read the owner's comments, apply decisions. Never fatal for the review.
+  if (!opts.dryRun) {
+    try {
+      const synced = await syncProposals(store, gcfg);
+      if (synced.length) digests.push(`## Agent proposals\n${synced.map((l) => `- ${l}`).join("\n")}`);
+    } catch (e) {
+      log(`architect: proposal sync failed: ${(e as Error).message}`);
+    }
+  }
   for (const name of projects) {
     const project = gcfg.projects[name];
     if (!project) throw new Error(`unknown project ${name}`);
@@ -139,6 +149,16 @@ export async function architectReview(store: Store, gcfg: GlobalConfig, opts: Re
     for (const t of items) for (const k of store.children(t.id)) store.update(k.id, { triaged: 1 });
     store.setMeta(`last-review:${name}`, new Date().toISOString());
     digests.push(`## ${name}\n${out.digest}\n\n### Decisions applied\n${applied.join("\n") || "(none)"}`);
+  }
+  // Then the owner's feedback on open proposals: one model call, one comment per proposal.
+  if (!opts.dryRun) {
+    try {
+      const answered = await answerProposalFeedback(store, gcfg);
+      if (answered.length) digests.push(`## Agent proposals: feedback answered\n${answered.map((l) => `- ${l}`).join("\n")}`);
+    } catch (e) {
+      log(`architect: answering proposal feedback failed: ${(e as Error).message}`);
+      digests.push(`## Agent proposals\n- answering the owner's feedback failed: ${(e as Error).message}`);
+    }
   }
   if (!digests.length) {
     log("architect: nothing to report");

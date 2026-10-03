@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { configDir } from "../../../global.ts";
 import { fakeContext, loadAgent, runAgentE2E } from "../../../testkit.ts";
@@ -41,6 +43,37 @@ describe("agent-creator", () => {
     expect((await verify(fakeContext({ result: { ...base, confirmation: noTest } }))).join(" ")).toContain("last step must run");
     const ops = { ...request, steps: [{ ...request.steps[0], content: JSON.stringify({ ...manifest, shell: ["ops"] }) }, ...request.steps.slice(1)] };
     expect((await verify(fakeContext({ result: { ...base, confirmation: ops } }))).join(" ")).toContain("ops");
+  });
+  test("a revision of an installed package may rewrite one file, but must quote what it replaces", async () => {
+    // Install a package in a scratch machine agents directory, then revise only its prompt.
+    const root = mkdtempSync(path.join(tmpdir(), "agentpipe-creator-"));
+    const saved = process.env.AGENTPIPE_CONFIG_DIR;
+    process.env.AGENTPIPE_CONFIG_DIR = root;
+    try {
+      const pkg = path.join(root, "agents", "sql-reviewer");
+      mkdirSync(path.join(pkg, "tests"), { recursive: true });
+      writeFileSync(path.join(pkg, "agent.json"), JSON.stringify(manifest));
+      writeFileSync(path.join(pkg, "prompt.md"), "You review SQL. Run find -exec file on everything.");
+      writeFileSync(path.join(pkg, "verify.ts"), "export default async () => [];");
+      writeFileSync(path.join(pkg, "tests", "sql-reviewer.test.ts"), "");
+      const revision = {
+        ...request,
+        title: "Fix sql-reviewer's prompt: stop asking for find -exec",
+        risk: "Only prompt.md changes; the previous text is quoted in the summary for restoring.",
+        steps: [{ kind: "write" as const, path: path.join(pkg, "prompt.md"), content: "You review SQL. Read each migration with the Read tool.", why: "drop the refused command" }, { kind: "command" as const, command: `bun test ${path.join(pkg, "tests")}`, cwd: "/home/x/src/agentpipe", why: "check" }],
+      };
+      const summary = "Fix: the prompt told the agent to batch `file` through find -exec, which the policy refuses as indirect execution. Before: 'Run find -exec file on everything.' After: 'Read each migration with the Read tool.' Nothing else changes; the manifest, verifier and tests stay as installed.";
+      expect(await verify(fakeContext({ result: { ...base, summary, confirmation: revision } }))).toEqual([]);
+      const silent = { ...revision, risk: "Only prompt.md changes." };
+      expect((await verify(fakeContext({ result: { ...base, summary: "Fixed the prompt so the agent reads migrations with the Read tool instead of running a refused command; nothing else in the package changes and the tests still pass as the last step.", confirmation: silent } }))).join(" ")).toContain("previous content");
+      // A brand-new package still needs every file.
+      const fresh = { ...revision, steps: [{ ...revision.steps[0], path: path.join(root, "agents", "other-agent", "prompt.md") }, revision.steps[1]] };
+      expect((await verify(fakeContext({ result: { ...base, summary, confirmation: fresh } }))).join(" ")).toContain("agent.json is missing");
+    } finally {
+      if (saved === undefined) delete process.env.AGENTPIPE_CONFIG_DIR;
+      else process.env.AGENTPIPE_CONFIG_DIR = saved;
+      rmSync(root, { recursive: true, force: true });
+    }
   });
   test.skipIf(!process.env.AGENTPIPE_E2E)("writes a package for approval", async () => {
     const r = await runAgentE2E("agent-creator", "Create an agent named changelog-writer (claude runtime, commits, paths CHANGELOG.md) that adds an entry to CHANGELOG.md for a given branch's changes. Inputs: the branch. Outputs: a branch with the CHANGELOG.md change.");

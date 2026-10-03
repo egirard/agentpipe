@@ -109,7 +109,14 @@ export interface Reply {
   text: string;
 }
 
-/** An agent an architect wished it had. Recorded, never created automatically. */
+/**
+ * An agent an architect wished it had. Recorded, published as a GitHub issue for the owner to
+ * discuss, and created only when the owner approves (then agent-creator builds it).
+ *
+ *   open ──▶ approved (agent-creator queued) ──▶ created (the agent is in the registry)
+ *     └────▶ dismissed
+ */
+export type ProposalStatus = "open" | "approved" | "created" | "dismissed";
 export interface ProposalRow {
   id: number;
   ts: string;
@@ -119,9 +126,34 @@ export interface ProposalRow {
   name: string;
   /** The AgentProposal as JSON (src/result.ts). */
   spec: string;
-  status: "open" | "dismissed" | "created";
+  status: ProposalStatus;
   /** How many times an agent asked for this one while it was open. */
   times: number;
+  /** The GitHub issue that carries the discussion, once published. */
+  issue_url: string | null;
+  issue_repo: string | null;
+  issue_number: number | null;
+  /** Newest issue comment timestamp read so far. */
+  comment_cursor: string | null;
+  /** Who decided (approved or dismissed), when, and the reason or note. */
+  decided_by: string | null;
+  decided_at: string | null;
+  decision_note: string | null;
+  /** The agent-creator task queued on approval. */
+  creator_task: number | null;
+}
+
+/** One message in a proposal's discussion: the owner's feedback (from the issue or the page) or the architect's answer. */
+export interface ProposalComment {
+  id: number;
+  proposal_id: number;
+  ts: string;
+  author: string;
+  /** issue: read from GitHub. web: typed on the status page. architect: the pipeline's answer. */
+  source: "issue" | "web" | "architect";
+  body: string;
+  /** Owner comments the architect has not answered yet are 0. */
+  answered: number;
 }
 
 export interface UsageRow {
@@ -218,6 +250,16 @@ CREATE TABLE IF NOT EXISTS agent_proposals (
   times INTEGER NOT NULL DEFAULT 1
 );
 CREATE INDEX IF NOT EXISTS agent_proposals_status ON agent_proposals(status, name);
+CREATE TABLE IF NOT EXISTS proposal_comments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  proposal_id INTEGER NOT NULL,
+  ts TEXT NOT NULL,
+  author TEXT NOT NULL,
+  source TEXT NOT NULL,
+  body TEXT NOT NULL,
+  answered INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS proposal_comments_proposal ON proposal_comments(proposal_id, id);
 `;
 
 /** Columns added after the first release; applied with ALTER TABLE when missing. */
@@ -229,6 +271,17 @@ const MIGRATIONS: [string, string][] = [
   ["worktree", "TEXT"],
   ["confirmation", "TEXT"],
   ["pr_gate", "TEXT"],
+];
+/** Same for agent_proposals: the GitHub issue link and the decision. */
+const PROPOSAL_MIGRATIONS: [string, string][] = [
+  ["issue_url", "TEXT"],
+  ["issue_repo", "TEXT"],
+  ["issue_number", "INTEGER"],
+  ["comment_cursor", "TEXT"],
+  ["decided_by", "TEXT"],
+  ["decided_at", "TEXT"],
+  ["decision_note", "TEXT"],
+  ["creator_task", "INTEGER"],
 ];
 
 function now(): string {
@@ -246,6 +299,8 @@ export class Store {
     this.db.exec(SCHEMA);
     const have = new Set((this.db.query("PRAGMA table_info(tasks)").all() as { name: string }[]).map((c) => c.name));
     for (const [col, ddl] of MIGRATIONS) if (!have.has(col)) this.db.exec(`ALTER TABLE tasks ADD COLUMN ${col} ${ddl}`);
+    const haveP = new Set((this.db.query("PRAGMA table_info(agent_proposals)").all() as { name: string }[]).map((c) => c.name));
+    for (const [col, ddl] of PROPOSAL_MIGRATIONS) if (!haveP.has(col)) this.db.exec(`ALTER TABLE agent_proposals ADD COLUMN ${col} ${ddl}`);
   }
 
   close() {
@@ -558,19 +613,67 @@ export class Store {
     return this.db.query("INSERT INTO agent_proposals (ts, task_id, project, proposed_by, name, spec) VALUES (?, ?, ?, ?, ?, ?) RETURNING *").get(now(), p.task_id, p.project, p.proposed_by, p.name, JSON.stringify(p.spec)) as ProposalRow;
   }
 
-  proposals(status?: ProposalRow["status"]): ProposalRow[] {
-    return (status ? this.db.query("SELECT * FROM agent_proposals WHERE status = ? ORDER BY times DESC, id DESC").all(status) : this.db.query("SELECT * FROM agent_proposals ORDER BY id DESC").all()) as ProposalRow[];
+  /** Proposals by status (one, several, or all when omitted), most asked-for first. */
+  proposals(status?: ProposalStatus | ProposalStatus[]): ProposalRow[] {
+    const list = status === undefined ? [] : Array.isArray(status) ? status : [status];
+    const sql = `SELECT * FROM agent_proposals ${list.length ? `WHERE status IN (${list.map(() => "?").join(",")})` : ""} ORDER BY times DESC, id DESC`;
+    return this.db.query(sql).all(...list) as ProposalRow[];
   }
 
   proposal(id: number): ProposalRow | null {
     return (this.db.query("SELECT * FROM agent_proposals WHERE id = ?").get(id) as ProposalRow | null) ?? null;
   }
 
-  setProposalStatus(id: number, status: ProposalRow["status"]): ProposalRow {
-    this.db.query("UPDATE agent_proposals SET status = ? WHERE id = ?").run(status, id);
+  /** The open or approved proposal for an agent name, if any. */
+  proposalByName(name: string): ProposalRow | null {
+    return (this.db.query("SELECT * FROM agent_proposals WHERE name = ? AND status IN ('open','approved') ORDER BY id DESC LIMIT 1").get(name) as ProposalRow | null) ?? null;
+  }
+
+  /** Change a proposal's status; a decision records who, when and why. */
+  setProposalStatus(id: number, status: ProposalStatus, decision?: { by: string; note?: string | null; creator_task?: number | null }): ProposalRow {
+    if (decision) this.db.query("UPDATE agent_proposals SET status = ?, decided_by = ?, decided_at = ?, decision_note = ?, creator_task = COALESCE(?, creator_task) WHERE id = ?").run(status, decision.by, now(), decision.note?.trim() || null, decision.creator_task ?? null, id);
+    else this.db.query("UPDATE agent_proposals SET status = ? WHERE id = ?").run(status, id);
     const r = this.proposal(id);
     if (!r) throw new Error(`no agent proposal #${id}`);
     return r;
+  }
+
+  /** Replace a proposal's specification (the architect revised it after feedback). */
+  setProposalSpec(id: number, spec: object): ProposalRow {
+    this.db.query("UPDATE agent_proposals SET spec = ? WHERE id = ?").run(JSON.stringify(spec), id);
+    return this.proposal(id)!;
+  }
+
+  /** Remember the GitHub issue a proposal was published as. */
+  linkProposalIssue(id: number, issue: { url: string; repo: string; number: number }): ProposalRow {
+    this.db.query("UPDATE agent_proposals SET issue_url = ?, issue_repo = ?, issue_number = ? WHERE id = ?").run(issue.url, issue.repo, issue.number, id);
+    return this.proposal(id)!;
+  }
+
+  setProposalCursor(id: number, cursor: string | null) {
+    this.db.query("UPDATE agent_proposals SET comment_cursor = ? WHERE id = ?").run(cursor, id);
+  }
+
+  /** Add a message to a proposal's discussion. Owner comments start unanswered; the architect's own are answered by definition. */
+  addProposalComment(c: { proposal_id: number; author: string; source: ProposalComment["source"]; body: string; ts?: string }): ProposalComment {
+    return this.db
+      .query("INSERT INTO proposal_comments (proposal_id, ts, author, source, body, answered) VALUES (?, ?, ?, ?, ?, ?) RETURNING *")
+      .get(c.proposal_id, c.ts ?? now(), c.author, c.source, c.body, c.source === "architect" ? 1 : 0) as ProposalComment;
+  }
+
+  proposalComments(proposalId: number): ProposalComment[] {
+    return this.db.query("SELECT * FROM proposal_comments WHERE proposal_id = ? ORDER BY ts, id").all(proposalId) as ProposalComment[];
+  }
+
+  /** Proposals still open whose owner has said something the architect has not answered. */
+  proposalsAwaitingAnswer(): ProposalRow[] {
+    return this.db
+      .query("SELECT p.* FROM agent_proposals p WHERE p.status = 'open' AND EXISTS (SELECT 1 FROM proposal_comments c WHERE c.proposal_id = p.id AND c.answered = 0) ORDER BY p.id")
+      .all() as ProposalRow[];
+  }
+
+  markProposalAnswered(proposalId: number) {
+    this.db.query("UPDATE proposal_comments SET answered = 1 WHERE proposal_id = ? AND answered = 0").run(proposalId);
   }
 
   /** Same agent, same project, same title, still open: a duplicate. */

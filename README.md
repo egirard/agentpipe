@@ -79,7 +79,9 @@ agentpipe edit 42 --description "read upstream/tt instead of cloning"   # fix wh
 agentpipe approve 42 | reject 42 --reason "not yet"   # decide what a github or agent-creator task proposed
 agentpipe digest                             # the architect's latest write-up
 agentpipe upgrade [--check]                  # on the box: pull the deployed checkout, bun install, restart the units
-agentpipe agents proposals                   # agents the architect wished it had; create one: agentpipe agents new NAME --from ID
+agentpipe agents proposals                   # agents the architect wished it had; each is a GitHub issue to discuss and decide
+agentpipe agents approve 3 | dismiss 3 --reason "..." | comment 3 "..." | thread 3 | sync   # or comment "approved" on the issue
+agentpipe cancel --all --project nile1978 --reason "restarting"   # every open task of a stream, in one go (also on its tab on the page)
 journalctl --user -u agentpipe-worker -f     # live worker log (also ~/.local/share/agentpipe/worker.log)
 systemctl --user start agentpipe-architect   # wake the architect now instead of waiting for the timer
 ```
@@ -99,7 +101,10 @@ run directory with full logs. Three ways out:
   names a refused command. The change is recorded as an event; reply or retry to requeue it.
 - `agentpipe cancel ID [--reason "..."]` when it proved impossible or moot. `cancelled` leaves
   "needs you", does not count against the agent's track record, and stays in the history with
-  the reason. Agents can reach it too: an agent that finds its task impossible as specified
+  the reason. `agentpipe cancel --all --project NAME` (or **Cancel all open tasks** on the
+  project's tab) sweeps a whole stream whose plan went wrong: queued, blocked, waiting, attention
+  and failed tasks are cancelled with the reason, a running one finishes its current agent call
+  and its result is recorded but acted on no further. Agents can reach it too: an agent that finds its task impossible as specified
   reports `cancelled` with why, the architect confirms or re-plans on its next review, and you
   are notified like for `attention`.
 
@@ -123,9 +128,38 @@ credential access), and every path must be under your home directory or the proj
   specification and installs it under `~/.config/agentpipe/agents/<name>/`, running its tests as
   the last step. This is how the architect grows the roster: when a goal needs a skill no agent
   has, it delegates the creation with the full spec, you approve the files, and on its next
-  review it delegates the waiting work to the new agent. Lighter **agent proposals** (a note
-  without a task, shown under "Suggested agents" and in `agentpipe agents proposals`) are for gaps
-  the goal does not depend on; `agentpipe agents new NAME --from ID` scaffolds one by hand.
+  review it delegates the waiting work to the new agent. It also revises an installed package
+  (a prompt that steers an agent into a refused command, a verifier that rejects good output) when
+  given the agent's name, the defect and its evidence. Lighter **agent proposals** (a note without
+  a task) are for gaps the goal does not depend on; they go through the review loop below.
+
+### Suggested agents: the proposal loop
+
+A proposal is an agent that does not exist yet, raised by the architect (or any delegating
+agent) when work needed a skill nobody on the roster has. Nothing is created from it without you:
+
+1. **It becomes a GitHub issue** in the agentpipe repository ("Proposed agent: NAME (runtime)"),
+   with the description, why it is needed, inputs, outputs, shell groups, and how to decide. The
+   status page's **Suggested agents** section shows the same card with a link to the issue and
+   the discussion so far.
+2. **You discuss it** by commenting on the issue or in the card's feedback box (mirrored to the
+   issue). On its next wake-up the architect reads the unanswered comments, answers in the
+   thread, and posts a revised specification when your feedback changes what the agent should be.
+   It can also withdraw the proposal when you show it is not needed.
+3. **You decide.** Comment `approved` or `please implement` (first line of the comment; only the
+   repository's owner, members, collaborators and `proposals.approvers` count), press **Approve**
+   on the card, or run `agentpipe agents approve ID`. That queues one `agent-creator` task
+   carrying the specification and everything you said; it writes the package and asks you to
+   approve the files under "Needs you". Comment `dismissed` (or close the issue, or press
+   Dismiss) to drop it; `reopen` brings it back.
+4. **It closes itself** once the agent is in the registry: the proposal is marked created and the
+   issue closed as completed.
+
+The sweep that publishes issues and reads them back runs from the architect's timer, from the
+status page every `proposals.pollSec` (so an approval typed on GitHub queues agent-creator within
+minutes), and on demand (`agentpipe agents sync`, the **Sync issues now** button). `proposals` in
+the machine config: `github` (off keeps proposals local), `repo` (default: the agentpipe
+checkout's origin), `approvers`, `pollSec`.
 
 `agentpipe show ID` prints a request (`--full` includes file contents); `approve` and `reject`
 decide it from the terminal.
@@ -221,7 +255,8 @@ no-go areas, how to run things).
   "worktrees": { "root": "", "link": ["node_modules"], "cleanup": true },
   "architect": { "maxRounds": 4, "maxOpenTasks": 300, "maxItemsPerReview": 12, "maxSubtasks": 30, "model": "" },
   "budgets": { "taskUsd": 5, "dailyUsd": 40, "agentAttentionRate": 0.5, "agentWindow": 10 },
-  "notifications": { "webhook": "", "command": "", "events": ["attention", "failed", "digest", "budget", "agent-health", "worker"] }
+  "notifications": { "webhook": "", "command": "", "events": ["attention", "failed", "digest", "budget", "agent-health", "worker"] },
+  "proposals": { "github": true, "repo": "", "approvers": [], "pollSec": 600 }
 }
 ```
 
@@ -229,7 +264,8 @@ Budgets are Claude spend as Claude Code reports it: per task (the task ends in a
 runs out) and per UTC day (cloud tasks wait for tomorrow; local ones keep going). A project's own
 `dailyUsd` (`agentpipe projects budget NAME --daily-usd N`) stops that stream's cloud tasks
 when it alone has spent that much, so one stream's self-improvement cannot starve another. `agentpipe spend`
-breaks it down. Notifications go to a webhook (Discord, Slack, ntfy and the like accept the body
+breaks it down; the status page shows and sets every cap (the global ones on the All projects tab, a
+stream's own on its tab). Notifications go to a webhook (Discord, Slack, ntfy and the like accept the body
 as sent) and/or a command, for tasks needing you, the architect's digest, budget events and
 agents whose recent runs mostly needed intervention. Interrupted tasks are requeued on restart,
 up to `maxAttempts`.
@@ -252,22 +288,26 @@ otherwise, so a plan step marks scripts and hooks `executable` and the pipeline 
 
 | URL | What |
 |---|---|
-| `http://mothership.local:8081/` | the page: online/offline, queue counts and an **Add task** form (an `agentpipe add` from the browser, project and agent selectable, architect by default), system checks (Ollama, GPU, worker, timer, Open WebUI, token, disks), machine meters, in-flight and needs-you lists, history with filters, latest architect digest, suggested agents, agent registry, link to the LLM chat |
+| `http://mothership.local:8081/` | the page, in tabs: **All projects** (queue counts, an **Add task** form, the global Claude caps, system checks, machine meters, every project's in-flight, needs-you and history lists, the architect digest, suggested agents, the agent registry) and **one tab per project** (its goal, path, branch, upstreams, status and counts; its Claude spend against its own or the global cap; controls: set its daily cap, pause or resume, make it current, **cancel all open tasks**; its own in-flight, needs-you and history lists) |
 | `https://mothership.local:8443/` | the same over HTTPS, needed for offline mode (below) |
-| `/api/status?history=60` | everything the page shows, as JSON (includes open agent proposals) |
+| `/api/status?history=60` | everything the page shows, as JSON (per-project budgets, open and approved proposals with their discussion) |
 | `/api/history?limit=200&project=…` | finished tasks |
 | `/api/task/ID` | one task with events, children, replies and its `report.md` |
-| `/api/proposals?all=1` | agent proposals (open by default) |
+| `/api/proposals?all=1`, `/api/proposal/ID` | agent proposals (open and approved by default), one with its discussion |
 | `POST /api/tasks` | `{description, project?, agent?, title?, priority?, acceptance?}`: queue a task |
 | `POST /api/task/ID/reply` | `{text, requeue?}`: answer the agent; requeues a stopped task |
 | `POST /api/task/ID/retry`, `POST /api/task/ID/cancel` | `{}` / `{reason?}` |
 | `POST /api/task/ID/edit` | `{title?, description?, acceptance?, agent?, priority?, files?}`: change what a task asks for (not while running); the "edit task" form on the page |
 | `POST /api/task/ID/approve`, `POST /api/task/ID/reject` | decide a confirmation request; approve runs its steps while the page polls the task |
-| `POST /api/proposal/ID/dismiss` | drop a suggested agent |
+| `POST /api/proposal/ID/approve`, `.../dismiss`, `.../reopen`, `.../comment` | decide or discuss a suggested agent (`{reason?}` / `{text}`); approve queues agent-creator |
+| `POST /api/proposals/sync` | publish new proposals as issues and read the threads now |
+| `POST /api/project/NAME/cancel-open` | `{reason?}`: cancel every open task of a project |
+| `POST /api/project/NAME/budget`, `.../pause`, `.../resume`, `.../use` | `{dailyUsd}` sets the project's own daily cap (0 = none); the others change its status or make it current |
+| `POST /api/budgets` | `{dailyUsd?, taskUsd?}`: the machine-wide Claude caps |
 | `POST /api/upgrade` | `{force?}`: pull, install, and schedule a restart of the worker and web units |
 | `/ca.crt` | the server's self-signed certificate |
 
-In the **Needs you** list an `attention` row shows what the agent is asking; clicking a row opens
+The tab you had open is remembered. In the **Needs you** list an `attention` row shows what the agent is asking; clicking a row opens
 the task: the description, the agent's report, the run report, earlier replies, and a reply box.
 "Reply and continue" stores the answer and requeues the task; "Retry as is" and "Cancel task" do
 what the CLI commands do. Writes are accepted only from the page's own origin with a JSON body
@@ -356,8 +396,10 @@ Built-ins: `architect` (also creates streams), `project-setup` (writes a new str
 cloud), `a11y-reviewer`, `ux-reviewer`, `docs-writer`, `graphics-designer` (SVG/CSS only),
 `project-manager`, `gitbot` (reports and comments, never merges), `shell-runner` (the only agent
 with a broad, vetted shell), `e2e-runner` (shell), `upstream-importer` (shell, commits: copies
-files from an upstream repository into the project from a JSON spec, no model). The status page
-lists them all with their metadata, shell groups and track record.
+files from an upstream repository into the project from a JSON spec, no model),
+`media-transcriber` (reads the PDFs, scans and photographs no other agent can and writes faithful
+Markdown or CSV transcriptions under `docs/`, marking every gap). The status page lists them all
+with their metadata, shell groups and track record.
 
 The full design and authoring guide, with the result contract, runtime behaviour, verification,
 delegation rules, testing and a worked example, is in [docs/AGENTS.md](docs/AGENTS.md).

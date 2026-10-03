@@ -23,6 +23,7 @@ beforeEach(() => {
   const g = loadGlobalConfig();
   g.projects.demo = { path: path.join(root, "repo"), base: "main", push: false };
   g.defaultProject = "demo";
+  g.proposals.github = false; // no gh in tests
   saveGlobalConfig(g);
   store = new Store();
   handler = createHandler(store, g, { port: 0, tlsPort: 0, host: "127.0.0.1", ollamaUrl: "http://127.0.0.1:1", webuiUrl: "http://127.0.0.1:1/" }, null);
@@ -149,5 +150,70 @@ describe("edit API", () => {
     expect(store.get(t.id)!.description).toBe("read upstream/tt");
     expect(store.get(t.id)!.acceptance).toEqual(["a", "b"]);
     expect((await post(`/api/task/${t.id}/edit`, { agent: "unicorn" })).status).toBe(400);
+  });
+});
+
+describe("project API", () => {
+  test("status carries each project's budget and open count; cancel-open sweeps the project; budget, pause, resume and use change the config", async () => {
+    const a = store.add({ project: "demo", agent: "coder", title: "a", description: "a" });
+    const b = store.add({ project: "demo", agent: "coder", title: "b", description: "b", depends_on: [a.id] });
+    let s = await (await handler(new Request("http://mothership:8081/api/status"))).json();
+    expect(s.queue[0].budget).toEqual({ todayUsd: 0, weekUsd: 0, dailyUsd: 0 });
+    expect(s.queue[0].open).toBe(2);
+    const r = await (await post("/api/project/demo/cancel-open", { reason: "fresh start" })).json();
+    expect(r.cancelled.sort()).toEqual([a.id, b.id].sort());
+    expect(r.note).toContain("2 task(s) of demo cancelled");
+    expect(store.get(a.id)!.status).toBe("cancelled");
+    expect(store.get(b.id)!.error).toBe("fresh start");
+    expect((await post("/api/project/nope/cancel-open", {})).status).toBe(404);
+    const bud = await (await post("/api/project/demo/budget", { dailyUsd: "15" })).json();
+    expect(bud.dailyUsd).toBe(15);
+    expect(loadGlobalConfig().projects.demo.dailyUsd).toBe(15);
+    s = await (await handler(new Request("http://mothership:8081/api/status"))).json();
+    expect(s.queue[0].budget.dailyUsd).toBe(15);
+    expect((await post("/api/project/demo/budget", { dailyUsd: "-3" })).status).toBe(400);
+    expect((await (await post("/api/project/demo/pause", {})).json()).status).toBe("paused");
+    expect(loadGlobalConfig().projects.demo.status).toBe("paused");
+    s = await (await handler(new Request("http://mothership:8081/api/status"))).json();
+    expect(s.queue[0].status).toBe("paused");
+    expect((await (await post("/api/project/demo/resume", {})).json()).status).toBe("active");
+    expect(loadGlobalConfig().projects.demo.status).toBeUndefined();
+    expect((await (await post("/api/project/demo/use", {})).json()).ok).toBe(true);
+    const caps = await (await post("/api/budgets", { dailyUsd: "30", taskUsd: "" })).json();
+    expect(caps.budgets.dailyUsd).toBe(30);
+    expect(caps.budgets.taskUsd).toBe(5);
+    s = await (await handler(new Request("http://mothership:8081/api/status"))).json();
+    expect(s.budgets.dailyCapUsd).toBe(30);
+  });
+});
+
+describe("proposal API", () => {
+  const spec = { name: "db-migrator", runtime: "claude", description: "Writes SQL migrations for the schema.", why: "SQL is off limits to the coder today.", inputs: "", outputs: "", commits: true, shell: [] };
+  test("comment is kept for the architect, approve queues agent-creator, dismiss records the reason, reopen brings it back", async () => {
+    const row = store.proposeAgent({ name: "db-migrator", spec, task_id: null, project: "demo", proposed_by: "architect-review" });
+    const c = await (await post(`/api/proposal/${row.id}/comment`, { text: "Make it SQLite only." })).json();
+    expect(c.proposal.comments.length).toBe(1);
+    expect(c.proposal.comments[0].source).toBe("web");
+    expect((await post(`/api/proposal/${row.id}/comment`, { text: " " })).status).toBe(400);
+    const one = await (await handler(new Request(`http://mothership:8081/api/proposal/${row.id}`))).json();
+    expect(one.proposal.comments[0].body).toBe("Make it SQLite only.");
+    const a = await (await post(`/api/proposal/${row.id}/approve`, {})).json();
+    expect(a.proposal.status).toBe("approved");
+    expect(a.task.agent).toBe("agent-creator");
+    expect(a.task.project).toBe("demo");
+    expect(store.get(a.task.id)!.description).toContain("Make it SQLite only.");
+    // Approved proposals stay visible on the page until the agent exists.
+    const s = await (await handler(new Request("http://mothership:8081/api/status"))).json();
+    expect(s.proposals.map((p: any) => p.status)).toEqual(["approved"]);
+    expect(s.proposalsRepo).toBe("off");
+    const other = store.proposeAgent({ name: "other-agent", spec: { ...spec, name: "other-agent" }, task_id: null, project: "demo", proposed_by: "architect-review" });
+    const d = await (await post(`/api/proposal/${other.id}/dismiss`, { reason: "shell-runner covers it" })).json();
+    expect(d.proposal.status).toBe("dismissed");
+    expect(d.proposal.decision_note).toBe("shell-runner covers it");
+    const r = await (await post(`/api/proposal/${other.id}/reopen`, {})).json();
+    expect(r.proposal.status).toBe("open");
+    const sync = await (await post("/api/proposals/sync", {})).json();
+    expect(sync.ok).toBe(true);
+    expect((await post("/api/proposal/999/approve", {})).status).toBe(400);
   });
 });
