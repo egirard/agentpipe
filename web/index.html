@@ -461,9 +461,12 @@ body[data-view="project"] .only-all { display: none; }
     if (panel.dataset.html !== html) {
       const typed = panel.querySelector("form.budget-form input")?.value;
       const focused = document.activeElement && panel.contains(document.activeElement);
+      const note = panel.querySelector(".controls .note");
+      const noteText = note ? note.textContent : "", noteErr = note ? note.classList.contains("err") : false;
       panel.innerHTML = html;
       panel.dataset.html = html;
       if (focused && typed !== undefined) { const i = panel.querySelector("form.budget-form input"); i.value = typed; i.focus(); }
+      if (noteText) setNote(panel.querySelector(".controls .note"), noteText, noteErr);
     }
   }
 
