@@ -119,3 +119,9 @@ agentpipe is not available in the project list; the text input fields lose their
 The mothership experiment has proven that our agent system needs some work.  Please review the installation and evaluate what happened and what went wrong.  I think we need to revise some of the agents.  For example, we should have a "check out a git repository within this directory, flagged as untracked within this repository" so that we can properly integrate content from other repositories.  There are likely many other points of failure, so please evaluate.
 
 `Outcome: post-mortem of the Nile1978 run on mothership from the task DB, digests, run logs and code; root causes ranked (stripAnsi corrupting diffs, upstream cache outside the checkout, subtasks bound to the parent project, chmod/file-mode gap, 7B coder context limits); no code changed.`
+
+## 21. 2026-10-02
+
+I paused the worker and merged the pr's.  Please institute the improvements as you've described.  After you've finished, I'd like you to review the system's ability to implement the tasks as laid out in Task #5/#6.  I am intending to delete all of the Nile1978 work and restart that task as a follow-up test of our operations, but would like to maintain those assets to assist your evaluation efforts.
+
+`Outcome: shipped and deployed (30c3ac2, 61df28d): stripAnsi fix, upstream repositories inside the checkout with CLI/architect support, upstream-importer agent, coder guards (big files, fragments, modes, reviewer cap), policy fixes (-exec, git -C, chmod +x), in-run confirmation retry, cross-project subtasks, agentpipe edit, per-project budgets, fresh streams start runnable; 166 tests green here and on mothership; upstream-fetcher retired to ~/.config/agentpipe/agents.retired. Nile1978 assets left untouched. Walk-through of the #5/#6 brief in the reply.`
