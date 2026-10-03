@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { currentProject, expandHome, loadGlobalConfig, projectStatus, updateGlobalConfig, type GlobalConfig, type PendingStep, type ProjectConfig } from "./global.ts";
@@ -119,10 +119,14 @@ export async function createProject(spec: ProjectSpec, opts: { allowRemote: bool
       mkdirSync(dir, { recursive: true });
       const base = spec.base ?? "main";
       await run(`git init -q -b ${q(base)}`, dir);
-      // Worktrees need a commit to start from.
+      // Worktrees need a commit to start from, and every branch cut from it needs pipeline commands
+      // that pass on an empty tree: placeholders go into the first commit, so no task waits on a
+      // setup pull request being merged. project-setup rewrites them once a toolchain exists.
+      writeFileSync(path.join(dir, "agentpipe.json"), JSON.stringify({ commands: { lint: "true", unit: "true", e2e: "" } }, null, 2) + "\n");
+      writeFileSync(path.join(dir, "AGENTPIPE.md"), `# AGENTPIPE.md\n\n${spec.goal}\n\nThis repository was created empty by agentpipe. There is no toolchain yet: \`agentpipe.json\` holds placeholder commands (\`true\`) so that early tasks can land. Whichever task adds the toolchain must also queue project-setup to rewrite \`agentpipe.json\` (real lint and unit commands, a \`setup\` command such as \`bun install\` for fresh worktrees) and this file.\n`);
       const who = (await sh("git config user.email", dir, 30)).output.trim() ? "" : "-c user.name=agentpipe -c user.email=agentpipe@localhost ";
-      await run(`git ${who}commit -q --allow-empty -m ${q(`Start ${spec.name}\n\n${spec.goal}`)}`, dir);
-      notes.push(`created an empty repository at ${dir} (branch ${base})`);
+      await run(`git add -A && git ${who}commit -q -m ${q(`Start ${spec.name}\n\n${spec.goal}`)}`, dir);
+      notes.push(`created a repository at ${dir} (branch ${base}) with placeholder agentpipe.json and AGENTPIPE.md`);
       if (spec.repo) {
         pending.push({ command: `gh repo create ${q(spec.repo.replace(/^https:\/\/github\.com\//, "").replace(/\.git$/, ""))} --private --source . --remote origin --push`, cwd: dir, why: `create the private GitHub repository ${spec.repo} and push ${base}` });
       }
@@ -195,12 +199,13 @@ export function queueStreamStart(store: Store, created: Created, spec: ProjectSp
     );
   }
   if (spec.kickoff) {
+    const ups = Object.keys(created.project.upstreams ?? {});
     out.push(
       store.add({
         project: created.name,
         agent: "architect",
         title: spec.kickoff.split("\n")[0].slice(0, 120),
-        description: spec.kickoff,
+        description: `${spec.kickoff}${ups.length ? `\n\nRead-only copies of ${ups.map((u) => "upstream/" + u).join(" and ")} are in this checkout; read them before planning, and use upstream-importer to copy files out of them.` : ""}${spec.kind === "new" ? "\n\nThis repository started empty: agentpipe.json holds placeholder commands (true). Once a toolchain exists, queue project-setup to rewrite agentpipe.json (real lint and unit commands, and a setup command such as bun install for fresh worktrees) and AGENTPIPE.md." : ""}`,
         depends_on: out.map((t) => t.id),
         created_by: createdBy,
       }),

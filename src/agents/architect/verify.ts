@@ -11,7 +11,8 @@ export default defineVerifier(async (ctx) => {
   const problems = [...noChanges(ctx.changedFiles), ...nonEmptySummary(result, 200)];
   const projects = result.projects ?? [];
   const proposals = result.agent_proposals ?? [];
-  if (result.status === "done" && result.subtasks.length === 0 && projects.length === 0) problems.push("status is done but no subtasks or projects were created; a plan with nothing to do should be attention with the reason" + (proposals.length ? " (agents were proposed: return attention so the human creates them)" : ""));
+  const upstreams = result.upstreams ?? [];
+  if (result.status === "done" && result.subtasks.length === 0 && projects.length === 0 && upstreams.length === 0) problems.push("status is done but no subtasks or projects were created; a plan with nothing to do should be attention with the reason" + (proposals.length ? " (agents were proposed: return attention so the human creates them)" : ""));
   if (result.status === "cancelled" && (result.subtasks.length || projects.length)) problems.push("status is cancelled but subtasks or projects were returned; a cancelled goal plans nothing");
   const registered = new Set(loadRegistry(ctx.project).agents.keys());
   for (const p of proposals) {
@@ -19,6 +20,7 @@ export default defineVerifier(async (ctx) => {
     if (!/\S/.test(p.why) || p.why.trim().length < 20) problems.push(`proposed agent "${p.name}" does not say why it is needed`);
   }
   for (const s of result.subtasks) if (proposals.some((p) => p.name === s.agent)) problems.push(`subtask "${s.title.slice(0, 60)}" names proposed agent "${s.agent}", which does not exist yet; work for it waits until a human creates it`);
+  for (const u of upstreams) if (!/^[\w.-]+\/[\w.-]+$/.test(u.repo) && !/^(https?:|git@|ssh:|\/|~\/)/.test(u.repo)) problems.push(`upstream "${u.repo}" is neither owner/name nor a git URL`);
   for (const p of projects) {
     if (p.kind === "branch" && !p.parent) problems.push(`project ${p.name}: a branch stream needs "parent"`);
     if (p.kind === "clone" && !p.repo) problems.push(`project ${p.name}: clone needs "repo"`);

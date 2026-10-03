@@ -48,6 +48,8 @@ export interface Config {
   runE2e: boolean;
   /** After a fully green run: push the branch to origin and open a PR with `gh` if available. Never merges. */
   push: boolean;
+  /** Command the worker runs once in every fresh worktree before a task uses it (e.g. "bun install"), unless the project config sets its own. */
+  setup: string;
 }
 
 export const DEFAULTS: Omit<Config, "repo"> = {
@@ -77,6 +79,7 @@ export const DEFAULTS: Omit<Config, "repo"> = {
   cloudFinalReview: true,
   runE2e: true,
   push: false,
+  setup: "",
 };
 
 /** Load KEY=VALUE lines from ~/.config/agentpipe/env into process.env (does not override existing vars). */

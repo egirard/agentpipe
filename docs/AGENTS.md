@@ -516,8 +516,14 @@ A project may hold **upstream repositories** (`upstreams` in its config; `agentp
 upstream add`, an `upstreams` list in a ProjectSpec, or `upstreams` in a project-creating agent's
 result): read-only clones under `<checkout>/upstream/<name>/`, excluded from git via the shared
 exclude file, symlinked into every worktree, pinned by commit in the config and rendered into
-every prompt. Fetching is a read and happens at once. The task that created a stream is closed
-when the human approves the stream's held GitHub steps; the stream's own queue carries the work.
+every prompt. Fetching is a read and happens at once; an agent whose result carries only
+`upstreams` (no subtasks, no projects) is run again once they are fetched, with a reply saying
+so, because it asked for the files before planning. A `new` stream's first commit holds a
+placeholder `agentpipe.json` (commands `true`) and `AGENTPIPE.md`, so its early branches pass
+the checks; the kickoff is told to queue `project-setup` once a toolchain exists. The repository's
+`agentpipe.json` may name a `setup` command (`bun install`) that the worker runs in every fresh
+worktree when the machine config has none. The task that created a stream is closed when the
+human approves the stream's held GitHub steps; the stream's own queue carries the work.
 A project can carry its own agents (`agentsDir`), its own pipeline tuning (`agentpipe.json` in
 the repo) and its own guidance for agents (`AGENTPIPE.md` at the repo root, read into every
 prompt: conventions, forbidden areas, how to run things). Prompts describe the stack from the

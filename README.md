@@ -164,10 +164,14 @@ agentpipe projects upstream list | update tabletop-template | remove tabletop-te
 agentpipe projects budget nile1978 --daily-usd 15   # this stream's own daily Claude cap
 ```
 
-What the architect may do when it creates a stream: clone a repository, `git init` a new one,
-create a stream branch, register the project, and queue its first tasks: `project-setup` (writes
-`agentpipe.json` and `AGENTPIPE.md` when the repo has none) and an architect task for the kickoff
-goal. Anything that changes GitHub (creating a repository, pushing the stream branch) is held:
+What the architect may do when it creates a stream: clone a repository, `git init` a new one
+(its first commit carries a placeholder `agentpipe.json` with `true` commands and an
+`AGENTPIPE.md` saying so, so branches cut from it pass the checks before a toolchain exists),
+fetch the stream's upstream repositories, create a stream branch, register the project, and queue
+its first tasks: `project-setup` (writes `agentpipe.json` and `AGENTPIPE.md` when the repo has
+none) and an architect task for the kickoff goal. An architect that needs an upstream it does not
+have returns it in `upstreams`, the worker fetches it and runs the architect again with the
+files in front of it. Anything that changes GitHub (creating a repository, pushing the stream branch) is held:
 the stream does not run, the task ends in `attention`, and `agentpipe projects approve NAME` does
 it. Creating a stream yourself with `projects create` runs those steps at once.
 
@@ -466,6 +470,7 @@ every invocation with its turn count and the cost Claude Code reports.
 | `limits.coderContextChars` | How much source the coder sees per step. |
 | `limits.coderMaxFileChars` | A writable file larger than this (default 20,000) skips the local coder, which must return whole files, and goes straight to the cloud fixer. |
 | `commands.*` | Lint, unit, e2e commands. `unit` receives file paths after `--` for targeted runs. |
+| `setup` | Command the worker runs once in every fresh worktree before a task uses it (`bun install`), unless the machine's project config sets its own `setup`. `project-setup` writes it. |
 
 ## e2e on NixOS
 

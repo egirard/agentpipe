@@ -236,7 +236,11 @@ describe("upstreams and stream closure", () => {
     expect(z.createdByTask).toBe(task.id);
     expect(existsSync(path.join(root, "z", "upstream", "tt", "README.md"))).toBe(true);
     expect(r.summary).toContain("fetched " + template);
-    expect(store.list({ project: "z" }).map((t) => t.agent)).toEqual(["project-setup", "architect"]);
+    // A new repository carries placeholder pipeline files in its first commit, so no setup task is needed yet.
+    expect(store.list({ project: "z" }).map((t) => t.agent)).toEqual(["architect"]);
+    expect(existsSync(path.join(root, "z", "agentpipe.json"))).toBe(true);
+    expect(store.list({ project: "z" })[0].description).toContain("upstream/tt");
+    expect(store.list({ project: "z" })[0].description).toContain("placeholder commands");
 
     // Simulate the held GitHub step and the creating task waiting in attention.
     updateGlobalConfig((g) => void (g.projects.z.pending = [{ command: "true", cwd: path.join(root, "z"), why: "stand-in" }]));
@@ -260,13 +264,16 @@ describe("upstreams and stream closure", () => {
     const store = new Store();
     const task = store.add({ project: "home2", agent: "architect", title: "Plan", description: "Plan" });
     const ok: AgentResult = { status: "done", summary: "Need the template.", findings: [], subtasks: [] };
-    expect(await fetchRequestedUpstreams(store, task, [{ repo: template, name: "tt" }], { result: ok, verification: { ran: true, ok: true, problems: [] } })).toBe(true);
+    const f = await fetchRequestedUpstreams(store, task, [{ repo: template, name: "tt" }], { result: ok, verification: { ran: true, ok: true, problems: [] } });
+    expect(f.ok).toBe(true);
+    expect(f.replan).toBe(true);
+    expect(f.notes[0]).toContain("fetched");
     expect(ok.status).toBe("done");
     expect(ok.summary).toContain("## Upstream repositories");
     expect(loadGlobalConfig().projects.home2.upstreams?.tt.sha).toMatch(/^[0-9a-f]{40}$/);
     expect(store.events(task.id).some((e) => e.kind === "upstream")).toBe(true);
     const bad: AgentResult = { status: "done", summary: "Need another.", findings: [], subtasks: [] };
-    expect(await fetchRequestedUpstreams(store, task, [{ repo: path.join(root, "missing") }], { result: bad, verification: { ran: true, ok: true, problems: [] } })).toBe(false);
+    expect((await fetchRequestedUpstreams(store, task, [{ repo: path.join(root, "missing") }], { result: bad, verification: { ran: true, ok: true, problems: [] } })).ok).toBe(false);
     expect(bad.status).toBe("attention");
     expect(bad.summary).toContain("NOT fetched");
     store.close();

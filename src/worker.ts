@@ -210,8 +210,14 @@ async function processTask(store: Store, gcfg: GlobalConfig, task: Task) {
     // With subtasks the task goes to waiting, not attention, so finish() would not tell anyone.
     void notify(gcfg, { kind: "attention", title: `agentpipe: #${task.id} created a project that needs you`, body: `${task.title}\n\nagentpipe show ${task.id}` });
   }
-  if (outcome?.result.upstreams?.length) await fetchRequestedUpstreams(store, task, outcome.result.upstreams, outcome);
+  const fetched = outcome?.result.upstreams?.length ? await fetchRequestedUpstreams(store, task, outcome.result.upstreams, outcome) : null;
   finish(store, gcfg, task, outcome, error, registry);
+  if (fetched?.replan) {
+    // The agent asked for the files before planning; now that they are there, it plans.
+    store.reply(task.id, "agentpipe", `The upstream repositories you asked for are fetched: ${fetched.notes.join("; ")}. They are under upstream/ in the checkout. Plan the work now with the files in front of you.`);
+    store.requeue(task.id, "upstreams fetched; running again to plan with them");
+    log(`worker: #${task.id} requeued: upstreams fetched, the agent plans next`);
+  }
 }
 
 /**
@@ -219,18 +225,20 @@ async function processTask(store: Store, gcfg: GlobalConfig, task: Task) {
  * at once; a failed fetch turns the task into attention with the reason, since the plan that
  * follows will depend on the files being there.
  */
-export async function fetchRequestedUpstreams(store: Store, task: Task, specs: import("./result.ts").UpstreamSpec[], outcome: Pick<RunOutcome, "result" | "verification">): Promise<boolean> {
+export async function fetchRequestedUpstreams(store: Store, task: Task, specs: import("./result.ts").UpstreamSpec[], outcome: Pick<RunOutcome, "result" | "verification">): Promise<{ ok: boolean; replan: boolean; notes: string[] }> {
   const { result } = outcome;
   if (result.status !== "done" || !outcome.verification.ok) {
     result.summary += `\n\n## Upstreams not fetched\nThe task did not finish cleanly, so ${specs.map((u) => u.repo).join(", ")} were not fetched.`;
-    return false;
+    return { ok: false, replan: false, notes: [] };
   }
   const lines: string[] = [];
+  const notes: string[] = [];
   let failed = false;
   for (const u of specs) {
     try {
       const r = await addUpstream(task.project, u);
       lines.push(`- ${r.note}${u.why ? ` (${u.why})` : ""}`);
+      notes.push(r.note);
       store.event(task.id, "upstream", r.note);
     } catch (e) {
       failed = true;
@@ -240,7 +248,9 @@ export async function fetchRequestedUpstreams(store: Store, task: Task, specs: i
   }
   result.summary += `\n\n## Upstream repositories\n${lines.join("\n")}`;
   if (failed) result.status = "attention";
-  return !failed;
+  // Fetched and nothing else planned or created: the agent wanted the files first; it runs again.
+  const replan = !failed && result.subtasks.length === 0 && !(result.projects?.length);
+  return { ok: !failed, replan, notes };
 }
 
 /**
@@ -341,14 +351,25 @@ async function prepareWorktree(store: Store, gcfg: GlobalConfig, name: string, p
     }
   }
   if (linked.length) await ensureIgnored(dir, linked);
-  if (project.setup) {
-    log(`worker: running project setup in ${dir}: ${project.setup}`);
-    const r = await sh(project.setup, dir, 900);
+  // The machine config's setup wins; otherwise the repository's own agentpipe.json may name one.
+  const setup = project.setup || repoSetup(dir);
+  if (setup) {
+    log(`worker: running project setup in ${dir}: ${setup}`);
+    const r = await sh(setup, dir, 900);
     if (!r.ok) throw new Error(`project setup failed (${r.code}): ${r.output.trim().slice(0, 300)}`);
   }
   const dirty = (await sh("git status --porcelain", dir, 60)).output.trim();
   if (dirty) throw new Error(`fresh worktree is not clean (check .gitignore for linked entries): ${dirty.split("\n").slice(0, 3).join("; ")}`);
   return { dir, startBranch, startRef };
+}
+
+/** The "setup" command written into a repository's agentpipe.json, if any; a broken file counts as none. */
+function repoSetup(dir: string): string {
+  try {
+    return loadConfig(dir).setup.trim();
+  } catch {
+    return "";
+  }
 }
 
 async function cleanupWorktree(gcfg: GlobalConfig, project: ProjectConfig, wt: Worktree) {

@@ -53,3 +53,12 @@ describe("architect", () => {
     expect(r.children.map((c) => c.agent)).toContain("coder");
   }, 20 * 60_000);
 });
+
+describe("architect: upstream requests", () => {
+  test("done with only upstreams is a complete answer; a malformed repo is not", async () => {
+    const only = { ...good, subtasks: [], upstreams: [{ repo: "egirard/TabletopTemplate", why: "the template to scaffold from" }] };
+    expect(await verify(fakeContext({ result: only }))).toEqual([]);
+    const bad = await verify(fakeContext({ result: { ...only, upstreams: [{ repo: "just a name" }] } }));
+    expect(bad.join(" ")).toContain("neither owner/name nor a git URL");
+  });
+});
