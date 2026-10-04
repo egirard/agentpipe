@@ -181,13 +181,13 @@ async function processTask(store: Store, gcfg: GlobalConfig, task: Task) {
   try {
     wt = await prepareWorktree(store, gcfg, task.project, project, task);
   } catch (e) {
-    // The project checkout is unusable (not a git repo, fetch broken, setup failing). Not the
-    // task's fault: hand it back and wait before trying anything else in this lane.
-    store.update(task.id, { attempts: Math.max(0, task.attempts - 1) });
-    store.setStatus(task.id, "queued", `project not ready: ${(e as Error).message.split("\n")[0]}`);
-    log(`worker: project ${task.project} not ready (${(e as Error).message.split("\n")[0]}); pausing ${gcfg.worker.pauseSec}s`);
-    await notify(gcfg, { kind: "worker", title: `agentpipe: project ${task.project} not ready`, body: (e as Error).message.slice(0, 500) });
-    await sleep(gcfg.worker.pauseSec * 1000);
+    // The project checkout is unusable (not a git repo, setup failing). Not the task's fault: hand it
+    // back and wait before trying anything else in this lane; after a few tries in a row, ask the human.
+    const why = (e as Error).message.split("\n")[0];
+    const gaveUp = projectNotReady(store, gcfg, task, why);
+    log(`worker: project ${task.project} not ready (${why}); ${gaveUp ? `#${task.id} needs the human` : `pausing ${gcfg.worker.pauseSec}s`}`);
+    await notify(gcfg, { kind: gaveUp ? "attention" : "worker", title: `agentpipe: project ${task.project} not ready`, body: (e as Error).message.slice(0, 500) });
+    if (!gaveUp) await sleep(gcfg.worker.pauseSec * 1000);
     return;
   }
   store.update(task.id, { worktree: wt.dir });
@@ -286,6 +286,30 @@ export async function createProposedProjects(store: Store, task: Task, specs: Pr
   result.summary += `\n\n## Projects\n${lines.join("\n")}`;
   if (needsHuman) result.status = "attention";
   return needsHuman;
+}
+
+/**
+ * A task whose project could not be prepared goes back to the queue without losing an attempt.
+ * Such failures rarely fix themselves (a setup command that cannot run, a missing checkout), so
+ * after worker.maxAttempts of them in a row the task goes to attention with the reason instead of
+ * cycling for ever; a reply or retry runs it again. Returns true when it gave up.
+ */
+export function projectNotReady(store: Store, gcfg: GlobalConfig, task: Task, why: string): boolean {
+  let earlier = 0;
+  for (const e of store.events(task.id).filter((e) => e.kind === "status").reverse()) {
+    if (e.message.includes("-> queued: project not ready")) earlier++;
+    else if (!e.message.includes("-> running")) break;
+  }
+  if (earlier + 1 >= gcfg.worker.maxAttempts) {
+    const error = `project not ready after ${earlier + 1} tries: ${why}. Fix the project (its "setup" command in the machine config or the repository's agentpipe.json, or the checkout itself), then retry this task.`;
+    store.update(task.id, { error });
+    store.setStatus(task.id, "attention", error);
+    store.settleParent(task.id);
+    return true;
+  }
+  store.update(task.id, { attempts: Math.max(0, task.attempts - 1) });
+  store.setStatus(task.id, "queued", `project not ready: ${why}`);
+  return false;
 }
 
 interface Worktree {

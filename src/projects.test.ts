@@ -228,7 +228,7 @@ describe("upstreams and stream closure", () => {
     store.setStatus(task.id, "running");
     const r: AgentResult = { status: "done", summary: "Created the stream.", findings: [], subtasks: [] };
     // "gh repo create" would fail here; a harmless pending command stands in for it.
-    const created = await createProposedProjects(store, task, [spec({ name: "z", kind: "new", path: path.join(root, "z"), upstreams: [{ repo: template, name: "tt", why: "the template" }], kickoff: "Scaffold z from upstream/tt" })], { result: r, verification: { ran: true, ok: true, problems: [] } });
+    const created = await createProposedProjects(store, task, [spec({ name: "z", kind: "new", path: path.join(root, "z"), setup: "bun install", upstreams: [{ repo: template, name: "tt", why: "the template" }], kickoff: "Scaffold z from upstream/tt" })], { result: r, verification: { ran: true, ok: true, problems: [] } });
     expect(created).toBe(false);
     const z = loadGlobalConfig().projects.z;
     expect(z.upstreams?.tt.repo).toBe(template);
@@ -239,6 +239,9 @@ describe("upstreams and stream closure", () => {
     // A new repository carries placeholder pipeline files in its first commit, so no setup task is needed yet.
     expect(store.list({ project: "z" }).map((t) => t.agent)).toEqual(["architect"]);
     expect(existsSync(path.join(root, "z", "agentpipe.json"))).toBe(true);
+    // A setup command has nothing to run on in an empty repository, so it is not recorded.
+    expect(z.setup).toBeUndefined();
+    expect(r.summary).toContain('setup "bun install" not recorded');
     expect(store.list({ project: "z" })[0].description).toContain("upstream/tt");
     expect(store.list({ project: "z" })[0].description).toContain("placeholder commands");
 

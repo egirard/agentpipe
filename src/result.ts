@@ -51,7 +51,7 @@ export const ProjectSpec = z.object({
   branch: z.string().optional().describe("branch: the stream branch name. Default: the project name."),
   base: z.string().optional().describe("existing/clone/new: branch tasks start from and pull requests target. Default: the repository's default branch, else main."),
   push: z.boolean().optional().describe("Open pull requests for green work. Default: the parent's setting for branch streams, true when there is a GitHub remote otherwise."),
-  setup: z.string().optional().describe("Command run once per fresh worktree, e.g. 'bun install'."),
+  setup: z.string().optional().describe("Command run once per fresh worktree, e.g. 'bun install'. Only for a repository that already has the toolchain it runs on; ignored for kind new."),
   link: z.array(z.string()).optional().describe("Entries of the main checkout to symlink into worktrees, e.g. node_modules."),
   upstreams: z.array(UpstreamSpec).optional().describe("Repositories to fetch read-only into the new stream's checkout under upstream/<name>/ (a template to scaffold from, a reference to read). Fetched at once; the kickoff can rely on them."),
   kickoff: z.string().optional().describe("A first goal for the architect in the new stream, queued once the stream is set up. Omit to leave the stream idle."),

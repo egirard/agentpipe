@@ -127,6 +127,12 @@ export async function createProject(spec: ProjectSpec, opts: { allowRemote: bool
       const who = (await sh("git config user.email", dir, 30)).output.trim() ? "" : "-c user.name=agentpipe -c user.email=agentpipe@localhost ";
       await run(`git add -A && git ${who}commit -q -m ${q(`Start ${spec.name}\n\n${spec.goal}`)}`, dir);
       notes.push(`created a repository at ${dir} (branch ${base}) with placeholder agentpipe.json and AGENTPIPE.md`);
+      if (spec.setup) {
+        // Nothing in an empty repository for it to run on; as the machine's setup it would fail in
+        // every worktree before any agent could add the toolchain.
+        notes.push(`setup "${spec.setup}" not recorded: the repository starts empty; project-setup writes one into agentpipe.json once a toolchain exists`);
+        spec = { ...spec, setup: undefined };
+      }
       if (spec.repo) {
         pending.push({ command: `gh repo create ${q(spec.repo.replace(/^https:\/\/github\.com\//, "").replace(/\.git$/, ""))} --private --source . --remote origin --push`, cwd: dir, why: `create the private GitHub repository ${spec.repo} and push ${base}` });
       }

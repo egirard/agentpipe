@@ -5,7 +5,7 @@ import path from "node:path";
 import { loadGlobalConfig, saveGlobalConfig } from "./global.ts";
 import type { Registry } from "./registry.ts";
 import { Store, type Task } from "./store.ts";
-import { finish, queuePrReview } from "./worker.ts";
+import { finish, projectNotReady, queuePrReview } from "./worker.ts";
 
 /**
  * Queuing the pull request gate: every task that opens a pull request gets exactly one review
@@ -160,5 +160,31 @@ describe("finish after a cancellation", () => {
     expect(after.run_dir).toBe("/tmp/run");
     expect(store.children(t.id)).toEqual([]);
     expect(store.events(t.id).some((e) => /finished after being cancelled/.test(e.message))).toBe(true);
+  });
+});
+
+describe("a project that cannot be prepared", () => {
+  test("the task is handed back without losing an attempt, then goes to attention after maxAttempts tries in a row", () => {
+    const g = loadGlobalConfig();
+    const why = "project setup failed (1): error: Bun could not find a package.json file to install from";
+    const t = store.add({ project: "demo", agent: "architect", title: "kickoff", description: "kickoff" });
+    for (let i = 1; i < g.worker.maxAttempts; i++) {
+      store.setStatus(t.id, "running");
+      store.update(t.id, { attempts: 1 });
+      expect(projectNotReady(store, g, store.get(t.id)!, why)).toBe(false);
+      expect(store.get(t.id)).toMatchObject({ status: "queued", attempts: 0 });
+    }
+    store.setStatus(t.id, "running");
+    expect(projectNotReady(store, g, store.get(t.id)!, why)).toBe(true);
+    const after = store.get(t.id)!;
+    expect(after.status).toBe("attention");
+    expect(after.error).toContain(`after ${g.worker.maxAttempts} tries`);
+    expect(after.error).toContain("package.json");
+
+    // The human's retry starts the count again.
+    store.setStatus(t.id, "queued", "retry by eugene");
+    store.setStatus(t.id, "running");
+    expect(projectNotReady(store, g, store.get(t.id)!, why)).toBe(false);
+    expect(store.get(t.id)!.status).toBe("queued");
   });
 });
